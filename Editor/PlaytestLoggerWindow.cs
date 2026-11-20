@@ -388,8 +388,8 @@ namespace PlaytestLoggerTool
             }
 
             collection.entries.Remove(entry);
-            PlaytestLogStore.DeleteEntryFiles(entry);
             PlaytestLogStore.Save(collection);
+            PlaytestLogStore.DeleteEntryFiles(entry);
             EvictEntryTexture(entryId);
             Repaint();
         }
