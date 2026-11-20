@@ -490,7 +490,9 @@ namespace PlaytestLoggerTool
             if (GUILayout.Button("+ New Entry", tab == Tab.NewEntry ? styles.TabActive : styles.TabInactive))
             {
                 tab = Tab.NewEntry;
-                if (draftTex == null || draftNeedsRetake) CaptureDraft();
+                bool retake = draftTex == null || (draftNeedsRetake && draftMarkers.Count == 0);
+                draftNeedsRetake = false;
+                if (retake) CaptureDraft();
             }
             string savedLabel = $"Saved Entries ({openCount} open • {collection.entries.Count} total)";
             if (GUILayout.Button(savedLabel, tab == Tab.SavedEntries ? styles.TabActive : styles.TabInactive))
