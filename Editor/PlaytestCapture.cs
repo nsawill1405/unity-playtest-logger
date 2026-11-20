@@ -36,15 +36,20 @@ namespace PlaytestLoggerTool
             return null;
         }
 
-        /// <summary>Captures the requested view, falling back to the Scene View camera. Caller owns the returned texture.</summary>
-        public static Texture2D Capture(CaptureSource source)
+        /// <summary>
+        /// Captures the requested view, falling back to the Scene View camera. <paramref name="actual"/> reports which
+        /// view the image came from so pins are resolved against the right camera. Caller owns the returned texture.
+        /// </summary>
+        public static Texture2D Capture(CaptureSource requested, out CaptureSource actual)
         {
-            Texture2D tex = null;
-            if (source == CaptureSource.GameView)
+            actual = requested;
+            if (requested == CaptureSource.GameView)
             {
-                tex = CaptureGameView() ?? CaptureCamera(Camera.main);
+                Texture2D tex = CaptureGameView() ?? CaptureCamera(Camera.main);
+                if (tex != null) return tex;
             }
-            return tex ?? CaptureCamera(SceneViewCamera);
+            actual = CaptureSource.SceneView;
+            return CaptureCamera(SceneViewCamera);
         }
 
         // Reads the Game View's own render target so Screen Space - Overlay UI is included.

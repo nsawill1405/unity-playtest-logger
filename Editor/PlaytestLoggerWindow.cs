@@ -111,14 +111,14 @@ namespace PlaytestLoggerTool
             {
                 EditorApplication.isPaused = true;
             }
-            Texture2D shot = PlaytestCapture.Capture(source);
+            Texture2D shot = PlaytestCapture.Capture(source, out CaptureSource actual);
 
             PlaytestLoggerWindow win = ShowWindow();
             win.tab = Tab.NewEntry;
             win.captureSource = source;
-            if (win.SetDraft(shot, source))
+            if (win.SetDraft(shot, actual))
             {
-                win.ShowBanner("Captured fresh screenshot (" + PlaytestCapture.DisplayName(source) + ")");
+                win.ShowBanner("Captured fresh screenshot (" + PlaytestCapture.DisplayName(actual) + ")");
             }
         }
 
@@ -212,7 +212,7 @@ namespace PlaytestLoggerTool
 
         void CaptureDraft()
         {
-            SetDraft(PlaytestCapture.Capture(captureSource), captureSource);
+            SetDraft(PlaytestCapture.Capture(captureSource, out CaptureSource actual), actual);
         }
 
         bool SetDraft(Texture2D capture, CaptureSource source)
@@ -280,7 +280,7 @@ namespace PlaytestLoggerTool
         // Saves a separate capture without touching the draft the user may be annotating.
         void SaveQuickScreenshot()
         {
-            Texture2D shot = PlaytestCapture.Capture(captureSource);
+            Texture2D shot = PlaytestCapture.Capture(captureSource, out CaptureSource actual);
             if (shot == null)
             {
                 ShowBanner("No Game View or Scene View camera to capture");
@@ -288,7 +288,7 @@ namespace PlaytestLoggerTool
             }
             try
             {
-                AddEntry(QuickScreenshotCategory, "Quick screenshot capture", shot, null, captureSource, new List<PinMarker>());
+                AddEntry(QuickScreenshotCategory, "Quick screenshot capture", shot, null, actual, new List<PinMarker>());
                 ShowBanner("Saved quick screenshot");
             }
             finally
@@ -358,21 +358,21 @@ namespace PlaytestLoggerTool
 
         void RetakeEntryScreenshot(LogEntry entry)
         {
-            Texture2D fresh = PlaytestCapture.Capture(captureSource);
+            Texture2D fresh = PlaytestCapture.Capture(captureSource, out CaptureSource actual);
             if (fresh == null)
             {
                 ShowBanner("No Game View or Scene View camera to capture");
                 return;
             }
 
-            entry.captureSource = captureSource;
+            entry.captureSource = actual;
             entry.scene = SceneManager.GetActiveScene().name;
             entry.contextInfo = PlaytestCapture.DescribeContext();
             WriteScreenshots(entry, fresh, fresh.EncodeToPNG());
             EvictEntryTexture(entry.id);
             entryTexCache[entry.id] = fresh;
             PlaytestLogStore.Save(collection);
-            ShowBanner("Retook screenshot (" + PlaytestCapture.DisplayName(captureSource) + ")");
+            ShowBanner("Retook screenshot (" + PlaytestCapture.DisplayName(actual) + ")");
         }
 
         void DeleteEntry(string entryId)
@@ -515,9 +515,9 @@ namespace PlaytestLoggerTool
                 EditorStyles.miniButton, GUILayout.Width(46f));
             if (GUILayout.Button("Retake (F1)", styles.SubtleButton, GUILayout.Width(82f)))
             {
-                if (SetDraft(PlaytestCapture.Capture(captureSource), captureSource))
+                if (SetDraft(PlaytestCapture.Capture(captureSource, out CaptureSource actual), actual))
                 {
-                    ShowBanner("Captured " + PlaytestCapture.DisplayName(captureSource));
+                    ShowBanner("Captured " + PlaytestCapture.DisplayName(actual));
                 }
             }
             EditorGUILayout.EndHorizontal();
