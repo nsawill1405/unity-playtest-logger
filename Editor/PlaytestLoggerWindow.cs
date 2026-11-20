@@ -1,1270 +1,618 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Reflection;
-using System.Text;
 using UnityEditor;
+using UnityEditorInternal;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using Object = UnityEngine.Object;
 
 namespace PlaytestLoggerTool
 {
-    [InitializeOnLoad]
     public class PlaytestLoggerWindow : EditorWindow
     {
-        [Serializable]
-        public class PinMarker
+        enum Tab
         {
-            public Vector2 normalizedPos; // (0..1, 0..1) from bottom-left
-            public string label;
+            NewEntry,
+            SavedEntries
         }
 
-        [Serializable]
-        public class LogEntry
+        enum MarkerEdit
         {
-            public string id;
-            public string timestamp;
-            public string category;
-            public string description;
-            public string scene;
-            public string contextInfo;
-            public string targetElement;
-            public string cleanScreenshotFile;
-            public string screenshotFile;
-            public string consoleLogFile;
-            public bool resolved;
-            public List<PinMarker> markers = new List<PinMarker>();
+            None,
+            Added,
+            Moved,
+            Removed
         }
 
-        [Serializable]
-        public class LogEntryCollection
+        /// <summary>A bool stored in EditorPrefs, read lazily (EditorPrefs can't be used from static initializers).</summary>
+        sealed class EditorPrefBool
         {
-            public List<LogEntry> entries = new List<LogEntry>();
+            readonly string key;
+            readonly bool defaultValue;
+            bool? cached;
+
+            public EditorPrefBool(string key, bool defaultValue)
+            {
+                this.key = "PlaytestLogger." + key;
+                this.defaultValue = defaultValue;
+            }
+
+            public bool Value
+            {
+                get => cached ??= EditorPrefs.GetBool(key, defaultValue);
+                set
+                {
+                    if (Value == value) return;
+                    cached = value;
+                    EditorPrefs.SetBool(key, value);
+                }
+            }
         }
 
-        // NOTE: Never put '/' in Popup strings — Unity treats '/' as nested submenus.
-        static readonly string[] Categories =
-        {
-            "UI & HUD",
-            "Todo",
-            "Bug",
-            "Physics & Controls",
-            "Camera",
-            "Visuals & Shaders",
-            "Level & Map"
-        };
+        const string WindowTitle = "Playtest Logger";
+        const string QuickScreenshotCategory = PlaytestCategories.Visuals;
+        const float ImageSidePadding = 44f;
+        const float PinHitRadius = 12f;
+        const double BannerSeconds = 2.8;
+        static readonly Vector2 MinWindowSize = new Vector2(430f, 500f);
+        static readonly string[] CaptureSourceLabels = { "Game View (UI)", "Scene View" };
 
-        static readonly string[] CaptureSources =
-        {
-            "Game View (UI)",
-            "Scene View"
-        };
+        static readonly EditorPrefBool AutoSyncActiveView = new EditorPrefBool("AutoSyncActiveView", true);
+        static readonly EditorPrefBool AttachScreenshot = new EditorPrefBool("AttachScreenshot", true);
+        static readonly EditorPrefBool AttachConsoleLogs = new EditorPrefBool("AttachConsoleLogs", true);
+        static readonly EditorPrefBool PauseOnQuickCapture = new EditorPrefBool("PauseOnQuickCapture", false);
+        static readonly EditorPrefBool HideResolved = new EditorPrefBool("HideResolved", false);
 
-        const int MaxConsoleBuffer = 80;
-        static readonly List<string> consoleBuffer = new List<string>(MaxConsoleBuffer);
+        static string DraftImagePath => Path.GetFullPath(Path.Combine(Application.dataPath, "..", "Library", "PlaytestLoggerDraft.png"));
 
-        public static string LogsRootDir => Path.GetFullPath(Path.Combine(Application.dataPath, "..", "PlaytestLogs"));
-        public static string ScreenshotsDir => Path.Combine(LogsRootDir, "Screenshots");
-        public static string ConsoleLogsDir => Path.Combine(LogsRootDir, "ConsoleLogs");
-        public static string JsonFilePath => Path.Combine(LogsRootDir, "entries.json");
-        public static string MarkdownFilePath => Path.Combine(LogsRootDir, "changes.md");
+        // Serialized so the draft survives domain reloads (e.g. entering Play Mode). The draft image itself
+        // is stashed in Library/ by OnDisable rather than serialized into the window layout.
+        [SerializeField] Tab tab;
+        [SerializeField] CaptureSource captureSource;
+        [SerializeField] CaptureSource draftSource;
+        bool draftNeedsRetake;
+        [SerializeField] int newCategoryIndex;
+        [SerializeField] bool categoryPickedManually;
+        [SerializeField] string newDescription = "";
+        [SerializeField] List<PinMarker> draftMarkers = new List<PinMarker>();
+        [SerializeField] string expandedEntryId = "";
+        [SerializeField] Vector2 formScroll;
+        [SerializeField] Vector2 savedScroll;
 
-        int actionIndex;
-        int captureSourceIndex;
-        int newCategoryIndex;
-        bool autoSyncActiveView = true;
-        bool includeScreenshot = true;
-        bool includeLogs = true;
-        bool pauseOnQuickCapture;
-        bool hideResolved;
-        string newDescription = "";
-        string statusBanner = "";
-        double statusBannerUntil;
-
-        string expandedEntryId = "";
-        string lastExternalViewType = "";
-
-        Texture2D draftCleanTex;
-        byte[] draftCleanPng;
-        readonly List<PinMarker> draftMarkers = new List<PinMarker>();
-
+        Texture2D draftTex;
+        byte[] draftPng;
         LogEntryCollection collection;
-        Vector2 formScroll;
-        Vector2 savedScroll;
-        readonly Dictionary<string, Texture2D> cleanTexCache = new Dictionary<string, Texture2D>();
+        readonly Dictionary<string, Texture2D> entryTexCache = new Dictionary<string, Texture2D>();
+        PlaytestLoggerStyles styles;
 
-        string draggingOwnerKey;
+        CaptureSource? lastFocusedViewSource;
         int draggingMarkerIndex = -1;
-        bool dragModifiedSavedEntry;
-
-        GUIStyle cardStyle;
-        GUIStyle headerBarStyle;
-        GUIStyle primaryBtnStyle;
-        GUIStyle subtleBtnStyle;
-        GUIStyle tabActiveStyle;
-        GUIStyle tabInactiveStyle;
-        GUIStyle textAreaStyle;
-        GUIStyle pinBadgeStyle;
-        GUIStyle categoryPillStyle;
-        GUIStyle rowHeaderBtnStyle;
-        GUIStyle sectionTitleStyle;
-        Texture2D cardBgTex;
-        Texture2D cardBorderTex;
-        Texture2D headerBgTex;
-        Texture2D primaryBtnTex;
-        Texture2D primaryBtnHoverTex;
-        Texture2D tabActiveTex;
-        Texture2D inputBgTex;
-
-        static PlaytestLoggerWindow()
-        {
-            Application.logMessageReceived -= OnUnityLog;
-            Application.logMessageReceived += OnUnityLog;
-        }
+        bool dragMoved;
+        bool scrollToExpandedEntry;
+        string banner;
+        double bannerUntil;
 
         [MenuItem("Window/Playtest Logger %#l", false, 1950)]
         public static void OpenWindowMenu()
         {
-            PlaytestLoggerWindow win = GetWindow<PlaytestLoggerWindow>("Playtest Logger");
-            win.minSize = new Vector2(430f, 500f);
-            win.RefreshEntries();
-            if (win.draftCleanTex == null)
-            {
-                win.CaptureDraftPreview();
-            }
-            win.Focus();
+            PlaytestLoggerWindow win = ShowWindow();
+            if (win.draftTex == null) win.CaptureDraft();
         }
 
         [MenuItem("Window/Playtest Logger Quick Capture _F1", false, 1951)]
         public static void QuickCaptureAndFocus()
         {
-            EditorWindow prevFocused = focusedWindow;
-            PlaytestLoggerWindow win = GetWindow<PlaytestLoggerWindow>("Playtest Logger");
-            win.minSize = new Vector2(430f, 500f);
-            if (prevFocused != null)
-            {
-                string prevType = prevFocused.GetType().FullName ?? "";
-                if (prevType == "UnityEditor.SceneView") win.captureSourceIndex = 1;
-                else if (prevType == "UnityEditor.GameView") win.captureSourceIndex = 0;
-            }
-            if (EditorApplication.isPlaying && win.pauseOnQuickCapture)
+            // Capture before focusing our window: if it is docked over the Game/Scene View, focusing it hides that view.
+            PlaytestLoggerWindow existing = FindExistingWindow();
+            CaptureSource source = PlaytestCapture.SourceOfWindow(focusedWindow)
+                ?? (existing != null ? existing.captureSource : CaptureSource.GameView);
+
+            if (EditorApplication.isPlaying && PauseOnQuickCapture.Value)
             {
                 EditorApplication.isPaused = true;
             }
-            win.actionIndex = 0;
-            win.CaptureDraftPreview();
-            win.RefreshEntries();
-            win.ShowBanner("Captured fresh screenshot (" + CaptureSources[win.captureSourceIndex] + ")");
-            win.Focus();
-            win.Repaint();
+            Texture2D shot = PlaytestCapture.Capture(source, out CaptureSource actual);
+
+            PlaytestLoggerWindow win = ShowWindow();
+            win.tab = Tab.NewEntry;
+            win.captureSource = source;
+            if (win.SetDraft(shot, actual))
+            {
+                win.ShowBanner("Captured fresh screenshot (" + PlaytestCapture.DisplayName(actual) + ")");
+            }
         }
 
-        static void OnUnityLog(string condition, string stackTrace, LogType type)
+        static PlaytestLoggerWindow FindExistingWindow()
         {
-            string time = DateTime.Now.ToString("HH:mm:ss");
-            string line = $"[{time}] [{type}] {condition}";
-            if ((type == LogType.Error || type == LogType.Exception) && !string.IsNullOrEmpty(stackTrace))
-            {
-                line += "\n" + stackTrace.TrimEnd();
-            }
-
-            lock (consoleBuffer)
-            {
-                if (consoleBuffer.Count >= MaxConsoleBuffer)
-                {
-                    consoleBuffer.RemoveAt(0);
-                }
-                consoleBuffer.Add(line);
-            }
+            PlaytestLoggerWindow[] windows = Resources.FindObjectsOfTypeAll<PlaytestLoggerWindow>();
+            return windows.Length > 0 ? windows[0] : null;
         }
+
+        static PlaytestLoggerWindow ShowWindow()
+        {
+            PlaytestLoggerWindow win = GetWindow<PlaytestLoggerWindow>(WindowTitle);
+            win.minSize = MinWindowSize;
+            win.Focus();
+            return win;
+        }
+
+        #region Lifecycle
 
         void OnEnable()
         {
             EditorApplication.update -= OnEditorTick;
             EditorApplication.update += OnEditorTick;
-            RefreshEntries();
+            newCategoryIndex = Mathf.Clamp(newCategoryIndex, 0, PlaytestCategories.Names.Length - 1);
+            RestoreDraftImage();
+            ReloadEntries();
         }
 
         void OnFocus()
         {
-            RefreshEntries();
+            ReloadEntries();
         }
 
         void OnDisable()
         {
             EditorApplication.update -= OnEditorTick;
-            ClearTextureCaches();
-            DestroyStyleTextures();
-            if (draftCleanTex != null)
-            {
-                DestroyImmediate(draftCleanTex);
-                draftCleanTex = null;
-            }
+            StashDraftImage();
+            ClearEntryTextureCache();
+            DestroyDraftTexture();
+            styles?.Dispose();
+            styles = null;
         }
 
-        // Automatically retakes draft screenshot when switching between Scene View and Game View tabs
+        void OnDestroy()
+        {
+            // OnDestroy only runs when the window is closed (not on domain reload), so drop the stashed draft.
+            if (File.Exists(DraftImagePath)) File.Delete(DraftImagePath);
+        }
+
         void OnEditorTick()
         {
-            if (!autoSyncActiveView) return;
-
-            EditorWindow fw = focusedWindow;
-            if (fw == null || fw == this) return;
-
-            string fullName = fw.GetType().FullName ?? "";
-            bool isGameView = fullName == "UnityEditor.GameView" || fullName == "UnityEditor.PlayModeView";
-            bool isSceneView = fullName == "UnityEditor.SceneView";
-            if (!isGameView && !isSceneView) return;
-
-            string viewKey = isGameView ? "Game" : "Scene";
-            if (viewKey != lastExternalViewType)
+            if (banner != null && EditorApplication.timeSinceStartup >= bannerUntil)
             {
-                lastExternalViewType = viewKey;
-                int targetSrc = isGameView ? 0 : 1;
-                captureSourceIndex = targetSrc;
-                EditorApplication.delayCall += () =>
-                {
-                    if (this == null) return;
-                    CaptureDraftPreview();
-                    Repaint();
-                };
+                banner = null;
+                Repaint();
             }
+            AutoSyncCaptureSource();
         }
 
-        void ClearTextureCaches()
+        // Follows the user between Scene View and Game View tabs and retakes the draft screenshot.
+        void AutoSyncCaptureSource()
         {
-            foreach (Texture2D tex in cleanTexCache.Values)
+            if (!AutoSyncActiveView.Value) return;
+            CaptureSource? view = PlaytestCapture.SourceOfWindow(focusedWindow);
+            if (view == null || view == lastFocusedViewSource) return;
+            lastFocusedViewSource = view;
+
+            // Never swap the screenshot out from under pins the user already placed.
+            if (draftMarkers.Count > 0) return;
+
+            captureSource = view.Value;
+            if (tab != Tab.NewEntry)
             {
-                if (tex != null) DestroyImmediate(tex);
+                // Retake when the user comes back to the New Entry tab.
+                draftNeedsRetake = true;
+                return;
             }
-            cleanTexCache.Clear();
-        }
-
-        void DestroyStyleTextures()
-        {
-            if (cardBgTex != null) DestroyImmediate(cardBgTex);
-            if (cardBorderTex != null) DestroyImmediate(cardBorderTex);
-            if (headerBgTex != null) DestroyImmediate(headerBgTex);
-            if (primaryBtnTex != null) DestroyImmediate(primaryBtnTex);
-            if (primaryBtnHoverTex != null) DestroyImmediate(primaryBtnHoverTex);
-            if (tabActiveTex != null) DestroyImmediate(tabActiveTex);
-            if (inputBgTex != null) DestroyImmediate(inputBgTex);
-            cardStyle = null;
-        }
-
-        static Texture2D MakeTex(Color col)
-        {
-            Texture2D t = new Texture2D(1, 1, TextureFormat.RGBA32, false);
-            t.hideFlags = HideFlags.HideAndDontSave;
-            t.SetPixel(0, 0, col);
-            t.Apply();
-            return t;
-        }
-
-        void EnsureStyles()
-        {
-            if (cardStyle != null && cardBgTex != null) return;
-
-            bool pro = EditorGUIUtility.isProSkin;
-            cardBgTex = MakeTex(pro ? new Color(0.165f, 0.175f, 0.205f, 1f) : new Color(0.88f, 0.89f, 0.91f, 1f));
-            cardBorderTex = MakeTex(pro ? new Color(0.25f, 0.27f, 0.32f, 1f) : new Color(0.72f, 0.74f, 0.78f, 1f));
-            headerBgTex = MakeTex(pro ? new Color(0.125f, 0.133f, 0.155f, 1f) : new Color(0.82f, 0.83f, 0.86f, 1f));
-            primaryBtnTex = MakeTex(new Color(0.20f, 0.48f, 0.86f, 1f));
-            primaryBtnHoverTex = MakeTex(new Color(0.26f, 0.56f, 0.95f, 1f));
-            tabActiveTex = MakeTex(pro ? new Color(0.24f, 0.28f, 0.36f, 1f) : new Color(0.75f, 0.80f, 0.88f, 1f));
-            inputBgTex = MakeTex(pro ? new Color(0.11f, 0.12f, 0.14f, 1f) : new Color(0.96f, 0.96f, 0.97f, 1f));
-
-            cardStyle = new GUIStyle
+            EditorApplication.delayCall += () =>
             {
-                normal = { background = cardBgTex },
-                padding = new RectOffset(12, 12, 10, 12),
-                margin = new RectOffset(8, 8, 4, 6)
-            };
-
-            headerBarStyle = new GUIStyle
-            {
-                normal = { background = headerBgTex },
-                padding = new RectOffset(10, 10, 8, 8)
-            };
-
-            primaryBtnStyle = new GUIStyle(GUI.skin.button)
-            {
-                normal = { background = primaryBtnTex, textColor = Color.white },
-                hover = { background = primaryBtnHoverTex, textColor = Color.white },
-                active = { background = primaryBtnHoverTex, textColor = Color.white },
-                fontStyle = FontStyle.Bold,
-                fontSize = 12,
-                padding = new RectOffset(12, 12, 6, 6)
-            };
-
-            subtleBtnStyle = new GUIStyle(EditorStyles.miniButton)
-            {
-                fontSize = 11,
-                padding = new RectOffset(8, 8, 3, 3)
-            };
-
-            tabActiveStyle = new GUIStyle(EditorStyles.miniButton)
-            {
-                normal = { background = tabActiveTex, textColor = pro ? Color.white : Color.black },
-                hover = { background = tabActiveTex, textColor = pro ? Color.white : Color.black },
-                fontStyle = FontStyle.Bold,
-                fontSize = 11,
-                fixedHeight = 25f
-            };
-
-            tabInactiveStyle = new GUIStyle(EditorStyles.miniButton)
-            {
-                fontSize = 11,
-                fixedHeight = 25f
-            };
-
-            textAreaStyle = new GUIStyle(EditorStyles.textArea)
-            {
-                normal = { background = inputBgTex, textColor = pro ? new Color(0.93f, 0.94f, 0.96f) : Color.black },
-                focused = { background = inputBgTex, textColor = pro ? Color.white : Color.black },
-                wordWrap = true,
-                fontSize = 12,
-                padding = new RectOffset(8, 8, 6, 6)
-            };
-
-            pinBadgeStyle = new GUIStyle(EditorStyles.miniBoldLabel)
-            {
-                alignment = TextAnchor.MiddleCenter,
-                fontSize = 10,
-                normal = { textColor = Color.white }
-            };
-
-            categoryPillStyle = new GUIStyle(EditorStyles.miniBoldLabel)
-            {
-                alignment = TextAnchor.MiddleCenter,
-                fontSize = 10,
-                padding = new RectOffset(6, 6, 2, 2),
-                normal = { textColor = Color.white }
-            };
-
-            rowHeaderBtnStyle = new GUIStyle(EditorStyles.label)
-            {
-                fontSize = 12,
-                fontStyle = FontStyle.Bold,
-                alignment = TextAnchor.MiddleLeft,
-                clipping = TextClipping.Clip
-            };
-
-            sectionTitleStyle = new GUIStyle(EditorStyles.boldLabel)
-            {
-                fontSize = 11
+                if (this == null) return;
+                CaptureDraft();
+                Repaint();
             };
         }
 
-        static Color CategoryColor(string cat)
+        void ShowBanner(string message)
         {
-            if (string.IsNullOrEmpty(cat)) return new Color(0.35f, 0.40f, 0.48f);
-            if (cat.StartsWith("UI")) return new Color(0.16f, 0.56f, 0.76f);
-            if (cat.StartsWith("Bug")) return new Color(0.80f, 0.26f, 0.28f);
-            if (cat.StartsWith("Todo")) return new Color(0.76f, 0.52f, 0.16f);
-            if (cat.StartsWith("Physics")) return new Color(0.52f, 0.34f, 0.78f);
-            if (cat.StartsWith("Camera")) return new Color(0.24f, 0.46f, 0.80f);
-            if (cat.StartsWith("Visuals")) return new Color(0.18f, 0.62f, 0.52f);
-            if (cat.StartsWith("Level") || cat.StartsWith("Map")) return new Color(0.28f, 0.62f, 0.32f);
-            return new Color(0.38f, 0.42f, 0.50f);
-        }
-
-        static string NormalizeLegacyCategory(string cat)
-        {
-            if (string.IsNullOrEmpty(cat)) return Categories[0];
-            for (int i = 0; i < Categories.Length; i++)
-            {
-                if (Categories[i] == cat) return cat;
-            }
-            if (cat.StartsWith("UI")) return Categories[0];
-            if (cat.StartsWith("Todo")) return Categories[1];
-            if (cat.StartsWith("Bug")) return Categories[2];
-            if (cat.StartsWith("Physics")) return Categories[3];
-            if (cat.StartsWith("Camera")) return Categories[4];
-            if (cat.StartsWith("Visuals")) return Categories[5];
-            if (cat.StartsWith("Map") || cat.StartsWith("Level")) return Categories[6];
-            return Categories[1];
-        }
-
-        void ShowBanner(string msg)
-        {
-            statusBanner = msg;
-            statusBannerUntil = EditorApplication.timeSinceStartup + 2.8;
+            banner = message;
+            bannerUntil = EditorApplication.timeSinceStartup + BannerSeconds;
             Repaint();
         }
 
-        static Texture2D CaptureGameViewWithUI()
+        #endregion
+
+        #region Draft & entries
+
+        void CaptureDraft()
         {
-            try
-            {
-                Type gvType = Type.GetType("UnityEditor.GameView,UnityEditor");
-                if (gvType != null)
-                {
-                    UnityEngine.Object[] views = Resources.FindObjectsOfTypeAll(gvType);
-                    if (views != null && views.Length > 0)
-                    {
-                        EditorWindow gv = views[0] as EditorWindow;
-                        if (gv != null)
-                        {
-                            gv.Repaint();
-                        }
-
-                        FieldInfo rtField = gvType.GetField("m_TargetTexture", BindingFlags.Instance | BindingFlags.NonPublic)
-                            ?? gvType.BaseType?.GetField("m_TargetTexture", BindingFlags.Instance | BindingFlags.NonPublic);
-                        PropertyInfo rtProp = gvType.GetProperty("targetTexture", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-
-                        RenderTexture targetRt = (rtField != null ? rtField.GetValue(views[0]) as RenderTexture : null)
-                            ?? (rtProp != null ? rtProp.GetValue(views[0], null) as RenderTexture : null);
-
-                        if (targetRt != null && targetRt.width > 0 && targetRt.height > 0)
-                        {
-                            RenderTexture temp = RenderTexture.GetTemporary(targetRt.width, targetRt.height, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
-                            Graphics.Blit(targetRt, temp);
-                            RenderTexture prev = RenderTexture.active;
-                            RenderTexture.active = temp;
-                            Texture2D tex = new Texture2D(temp.width, temp.height, TextureFormat.RGB24, false);
-                            tex.ReadPixels(new Rect(0, 0, temp.width, temp.height), 0, 0);
-                            tex.Apply();
-                            RenderTexture.active = prev;
-                            RenderTexture.ReleaseTemporary(temp);
-                            return tex;
-                        }
-                    }
-                }
-            }
-            catch
-            {
-            }
-
-            if (Application.isPlaying)
-            {
-                Texture2D screenTex = ScreenCapture.CaptureScreenshotAsTexture();
-                if (screenTex != null) return screenTex;
-            }
-            return null;
+            SetDraft(PlaytestCapture.Capture(captureSource, out CaptureSource actual), actual);
         }
 
-        static Texture2D CaptureCameraDirect(Camera cam, int w = 1280, int h = 720)
+        bool SetDraft(Texture2D capture, CaptureSource source)
         {
-            if (cam == null) return null;
-            RenderTexture rt = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32);
-            RenderTexture prevTarget = cam.targetTexture;
-            RenderTexture prevActive = RenderTexture.active;
-            cam.targetTexture = rt;
-            cam.Render();
-            RenderTexture.active = rt;
-            Texture2D tex = new Texture2D(w, h, TextureFormat.RGB24, false);
-            tex.ReadPixels(new Rect(0, 0, w, h), 0, 0);
-            tex.Apply();
-            cam.targetTexture = prevTarget;
-            RenderTexture.active = prevActive;
-            DestroyImmediate(rt);
-            return tex;
-        }
-
-        static Texture2D CaptureSelectedSource(int sourceIdx)
-        {
-            Texture2D captured = null;
-            if (sourceIdx == 0)
+            if (capture == null)
             {
-                captured = CaptureGameViewWithUI();
-                if (captured == null)
-                {
-                    captured = CaptureCameraDirect(Camera.main);
-                }
+                ShowBanner("No Game View or Scene View camera to capture");
+                return false;
             }
-            else if (SceneView.lastActiveSceneView != null && SceneView.lastActiveSceneView.camera != null)
-            {
-                captured = CaptureCameraDirect(SceneView.lastActiveSceneView.camera);
-            }
-
-            if (captured == null && SceneView.lastActiveSceneView != null && SceneView.lastActiveSceneView.camera != null)
-            {
-                captured = CaptureCameraDirect(SceneView.lastActiveSceneView.camera);
-            }
-            return captured;
-        }
-
-        void CaptureDraftPreview()
-        {
-            Texture2D captured = CaptureSelectedSource(captureSourceIndex);
-            if (captured != null)
-            {
-                if (draftCleanTex != null) DestroyImmediate(draftCleanTex);
-                draftCleanTex = captured;
-                draftCleanPng = draftCleanTex.EncodeToPNG();
-            }
-        }
-
-        static string GetTransformPath(Transform t)
-        {
-            if (t == null) return "";
-            string path = t.name;
-            Transform cur = t.parent;
-            int depth = 0;
-            while (cur != null && depth < 5)
-            {
-                path = cur.name + "/" + path;
-                cur = cur.parent;
-                depth++;
-            }
-            return path;
-        }
-
-        static string DetectTargetAtNormalizedPoint(Vector2 normBottomLeft, Vector2 referencePixelSize, bool isSceneViewSource)
-        {
-            if (!isSceneViewSource)
-            {
-                Vector2 screenPt = new Vector2(normBottomLeft.x * referencePixelSize.x, normBottomLeft.y * referencePixelSize.y);
-#if UNITY_6000_0_OR_NEWER
-                Canvas[] canvases = FindObjectsByType<Canvas>();
-#else
-                Canvas[] canvases = FindObjectsOfType<Canvas>();
-#endif
-                RectTransform bestUi = null;
-                float smallestArea = float.MaxValue;
-
-                for (int c = 0; c < canvases.Length; c++)
-                {
-                    Canvas canvas = canvases[c];
-                    if (canvas == null || !canvas.isActiveAndEnabled) continue;
-
-                    Camera uiCam = canvas.renderMode == RenderMode.ScreenSpaceOverlay
-                        ? null
-                        : (canvas.worldCamera != null ? canvas.worldCamera : Camera.main);
-
-                    RectTransform[] rects = canvas.GetComponentsInChildren<RectTransform>(false);
-                    for (int r = 0; r < rects.Length; r++)
-                    {
-                        RectTransform rt = rects[r];
-                        if (rt == null || rt.transform == canvas.transform) continue;
-                        CanvasRenderer cr = rt.GetComponent<CanvasRenderer>();
-                        if (cr == null && rt.childCount > 0) continue;
-
-                        if (RectTransformUtility.RectangleContainsScreenPoint(rt, screenPt, uiCam))
-                        {
-                            Vector2 size = Vector2.Scale(rt.rect.size, rt.lossyScale);
-                            float area = Mathf.Abs(size.x * size.y);
-                            if (area > 1f && area <= smallestArea)
-                            {
-                                smallestArea = area;
-                                bestUi = rt;
-                            }
-                        }
-                    }
-                }
-
-                if (bestUi != null)
-                {
-                    return $"UI: {GetTransformPath(bestUi)} ({normBottomLeft.x * 100f:F0}%, {normBottomLeft.y * 100f:F0}%)";
-                }
-            }
-
-            Camera rayCam = isSceneViewSource && SceneView.lastActiveSceneView != null
-                ? SceneView.lastActiveSceneView.camera
-                : Camera.main;
-            if (rayCam != null)
-            {
-                Ray ray = rayCam.ViewportPointToRay(new Vector3(normBottomLeft.x, normBottomLeft.y, 0f));
-                if (Physics.Raycast(ray, out RaycastHit hit, 800f))
-                {
-                    return $"Object: {GetTransformPath(hit.transform)} at {hit.point:F1}";
-                }
-            }
-
-            return $"Spot ({normBottomLeft.x * 100f:F0}%, {normBottomLeft.y * 100f:F0}%)";
-        }
-
-        static byte[] BakeMarkersOntoPng(Texture2D cleanTex, byte[] cleanPngFallback, List<PinMarker> markers)
-        {
-            if (cleanTex == null) return cleanPngFallback;
-            if (markers == null || markers.Count == 0)
-            {
-                return cleanPngFallback ?? cleanTex.EncodeToPNG();
-            }
-
-            Texture2D copy = new Texture2D(cleanTex.width, cleanTex.height, TextureFormat.RGB24, false);
-            copy.SetPixels32(cleanTex.GetPixels32());
-
-            int outerR = Mathf.Max(14, Mathf.RoundToInt(Mathf.Min(copy.width, copy.height) * 0.025f));
-            int innerR = Mathf.Max(10, outerR - 4);
-            Color32 ringColor = new Color32(255, 55, 55, 255);
-            Color32 outlineColor = new Color32(255, 240, 80, 255);
-
-            for (int m = 0; m < markers.Count; m++)
-            {
-                Vector2 p = markers[m].normalizedPos;
-                int cx = Mathf.Clamp(Mathf.RoundToInt(p.x * (copy.width - 1)), 0, copy.width - 1);
-                int cy = Mathf.Clamp(Mathf.RoundToInt(p.y * (copy.height - 1)), 0, copy.height - 1);
-
-                for (int dy = -outerR - 2; dy <= outerR + 2; dy++)
-                {
-                    int py = cy + dy;
-                    if (py < 0 || py >= copy.height) continue;
-                    for (int dx = -outerR - 2; dx <= outerR + 2; dx++)
-                    {
-                        int px = cx + dx;
-                        if (px < 0 || px >= copy.width) continue;
-                        int distSq = dx * dx + dy * dy;
-                        if (distSq >= innerR * innerR && distSq <= outerR * outerR)
-                        {
-                            copy.SetPixel(px, py, ringColor);
-                        }
-                        else if (distSq > outerR * outerR && distSq <= (outerR + 2) * (outerR + 2))
-                        {
-                            copy.SetPixel(px, py, outlineColor);
-                        }
-                        else if (distSq <= 9)
-                        {
-                            copy.SetPixel(px, py, ringColor);
-                        }
-                    }
-                }
-            }
-
-            copy.Apply();
-            byte[] bytes = copy.EncodeToPNG();
-            DestroyImmediate(copy);
-            return bytes;
-        }
-
-        static string CaptureSceneContextString()
-        {
-            string mode = EditorApplication.isPlaying ? "PlayMode" : "EditMode";
-            GameObject player = null;
-            try
-            {
-                player = GameObject.FindWithTag("Player");
-            }
-            catch
-            {
-            }
-
-            if (player != null)
-            {
-                Vector3 p = player.transform.position;
-                Rigidbody rb = player.GetComponent<Rigidbody>();
-                string velInfo = rb != null
-                    ? $" | Speed={rb.linearVelocity.magnitude:F1}"
-                    : "";
-                return $"{mode} | PlayerPos=({p.x:F1}, {p.y:F1}, {p.z:F1}){velInfo}";
-            }
-
-            if (Camera.main != null)
-            {
-                Vector3 cp = Camera.main.transform.position;
-                return $"{mode} | CamPos=({cp.x:F1}, {cp.y:F1}, {cp.z:F1})";
-            }
-
-            return mode;
-        }
-
-        static string BuildConsoleSnapshot(string sceneName, string contextInfo, List<PinMarker> markers)
-        {
-            StringBuilder sb = new StringBuilder();
-            sb.AppendLine("=== Playtest Console Snapshot ===");
-            sb.AppendLine("Timestamp: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
-            sb.AppendLine("Scene: " + sceneName);
-            sb.AppendLine("Context: " + contextInfo);
-            if (markers != null && markers.Count > 0)
-            {
-                for (int i = 0; i < markers.Count; i++)
-                {
-                    sb.AppendLine($"Marker #{i + 1}: {markers[i].label}");
-                }
-            }
-            sb.AppendLine("---------------------------------");
-            lock (consoleBuffer)
-            {
-                for (int i = 0; i < consoleBuffer.Count; i++)
-                {
-                    sb.AppendLine(consoleBuffer[i]);
-                }
-            }
-            return sb.ToString();
-        }
-
-        void SaveDraftEntry(bool quickScreenshotOnly)
-        {
-            Directory.CreateDirectory(LogsRootDir);
-            Directory.CreateDirectory(ScreenshotsDir);
-            Directory.CreateDirectory(ConsoleLogsDir);
-
-            if (draftCleanTex == null && (includeScreenshot || quickScreenshotOnly))
-            {
-                CaptureDraftPreview();
-            }
-
-            string id = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
-            string sceneName = SceneManager.GetActiveScene().name;
-            string contextInfo = CaptureSceneContextString();
-            string cleanRel = "";
-            string finalRel = "";
-            string consoleRel = "";
-
-            List<PinMarker> markersCopy = new List<PinMarker>();
-            if (!quickScreenshotOnly)
-            {
-                for (int i = 0; i < draftMarkers.Count; i++)
-                {
-                    markersCopy.Add(new PinMarker
-                    {
-                        normalizedPos = draftMarkers[i].normalizedPos,
-                        label = draftMarkers[i].label
-                    });
-                }
-            }
-
-            if ((includeScreenshot || quickScreenshotOnly) && draftCleanTex != null)
-            {
-                cleanRel = "Screenshots/" + id + "_clean.png";
-                finalRel = "Screenshots/" + id + ".png";
-                byte[] rawBytes = draftCleanPng ?? draftCleanTex.EncodeToPNG();
-                File.WriteAllBytes(Path.Combine(LogsRootDir, cleanRel), rawBytes);
-                byte[] bakedBytes = BakeMarkersOntoPng(draftCleanTex, rawBytes, markersCopy);
-                File.WriteAllBytes(Path.Combine(LogsRootDir, finalRel), bakedBytes);
-            }
-
-            if (includeLogs)
-            {
-                consoleRel = "ConsoleLogs/" + id + ".log";
-                File.WriteAllText(Path.Combine(LogsRootDir, consoleRel), BuildConsoleSnapshot(sceneName, contextInfo, markersCopy));
-            }
-
-            LogEntry entry = new LogEntry
-            {
-                id = id,
-                timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-                category = quickScreenshotOnly ? "Visuals & Shaders" : Categories[newCategoryIndex],
-                description = quickScreenshotOnly
-                    ? (string.IsNullOrWhiteSpace(newDescription) ? "Quick screenshot capture" : newDescription.Trim())
-                    : (string.IsNullOrWhiteSpace(newDescription) ? "(No description)" : newDescription.Trim()),
-                scene = sceneName,
-                contextInfo = contextInfo,
-                cleanScreenshotFile = cleanRel,
-                screenshotFile = finalRel,
-                consoleLogFile = consoleRel,
-                resolved = false,
-                markers = markersCopy
-            };
-
-            RefreshEntries();
-            collection.entries.Insert(0, entry);
-            expandedEntryId = entry.id;
-            PersistCollection(collection);
-
-            if (!quickScreenshotOnly)
-            {
-                newDescription = "";
-                draftMarkers.Clear();
-            }
-            ShowBanner("Saved entry to PlaytestLogs/changes.md");
-        }
-
-        void RebakeSavedEntryScreenshot(LogEntry entry)
-        {
-            Texture2D cleanTex = GetCleanTextureForEntry(entry);
-            if (cleanTex == null) return;
-
-            Directory.CreateDirectory(ScreenshotsDir);
-            if (string.IsNullOrEmpty(entry.screenshotFile))
-            {
-                entry.screenshotFile = "Screenshots/" + entry.id + ".png";
-            }
-            byte[] baked = BakeMarkersOntoPng(cleanTex, null, entry.markers);
-            File.WriteAllBytes(Path.Combine(LogsRootDir, entry.screenshotFile), baked);
-            PersistCollection(collection);
-        }
-
-        void RetakeSavedEntryScreenshot(LogEntry entry)
-        {
-            Texture2D fresh = CaptureSelectedSource(captureSourceIndex);
-            if (fresh == null)
-            {
-                ShowBanner("No active Game View or Scene View camera found");
-                return;
-            }
-
-            Directory.CreateDirectory(ScreenshotsDir);
-            if (string.IsNullOrEmpty(entry.id))
-            {
-                entry.id = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
-            }
-
-            entry.cleanScreenshotFile = "Screenshots/" + entry.id + "_clean.png";
-            entry.screenshotFile = "Screenshots/" + entry.id + ".png";
-
-            byte[] cleanBytes = fresh.EncodeToPNG();
-            File.WriteAllBytes(Path.Combine(LogsRootDir, entry.cleanScreenshotFile), cleanBytes);
-
-            if (cleanTexCache.TryGetValue(entry.id, out Texture2D oldTex) && oldTex != null)
-            {
-                DestroyImmediate(oldTex);
-            }
-            cleanTexCache[entry.id] = fresh;
-
-            byte[] baked = BakeMarkersOntoPng(fresh, cleanBytes, entry.markers);
-            File.WriteAllBytes(Path.Combine(LogsRootDir, entry.screenshotFile), baked);
-
-            entry.contextInfo = CaptureSceneContextString();
-            PersistCollection(collection);
-            ShowBanner("Retook screenshot (" + CaptureSources[captureSourceIndex] + ")");
-        }
-
-        Texture2D GetCleanTextureForEntry(LogEntry entry)
-        {
-            if (entry == null) return null;
-            string cacheKey = !string.IsNullOrEmpty(entry.id) ? entry.id : entry.screenshotFile;
-            if (!string.IsNullOrEmpty(cacheKey) && cleanTexCache.TryGetValue(cacheKey, out Texture2D cached) && cached != null)
-            {
-                return cached;
-            }
-
-            string rel = !string.IsNullOrEmpty(entry.cleanScreenshotFile) ? entry.cleanScreenshotFile : entry.screenshotFile;
-            if (string.IsNullOrEmpty(rel)) return null;
-
-            string full = Path.Combine(LogsRootDir, rel);
-            if (!File.Exists(full) && !string.IsNullOrEmpty(entry.screenshotFile))
-            {
-                full = Path.Combine(LogsRootDir, entry.screenshotFile);
-            }
-            if (!File.Exists(full)) return null;
-
-            Texture2D tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-            tex.LoadImage(File.ReadAllBytes(full));
-            if (!string.IsNullOrEmpty(cacheKey))
-            {
-                cleanTexCache[cacheKey] = tex;
-            }
-            return tex;
-        }
-
-        void RefreshEntries()
-        {
-            if (!File.Exists(JsonFilePath))
-            {
-                collection = new LogEntryCollection();
-                return;
-            }
-            try
-            {
-                collection = JsonUtility.FromJson<LogEntryCollection>(File.ReadAllText(JsonFilePath)) ?? new LogEntryCollection();
-                for (int i = 0; i < collection.entries.Count; i++)
-                {
-                    LogEntry e = collection.entries[i];
-                    e.category = NormalizeLegacyCategory(e.category);
-                    if (e.markers == null) e.markers = new List<PinMarker>();
-                    if (e.markers.Count == 0 && !string.IsNullOrEmpty(e.targetElement))
-                    {
-                        e.markers.Add(new PinMarker { normalizedPos = new Vector2(0.5f, 0.5f), label = e.targetElement });
-                        e.targetElement = "";
-                    }
-                }
-                if (string.IsNullOrEmpty(expandedEntryId) && collection.entries.Count > 0)
-                {
-                    expandedEntryId = collection.entries[0].id;
-                }
-            }
-            catch
-            {
-                collection = new LogEntryCollection();
-            }
-        }
-
-        static void PersistCollection(LogEntryCollection data)
-        {
-            Directory.CreateDirectory(LogsRootDir);
-            File.WriteAllText(JsonFilePath, JsonUtility.ToJson(data, true));
-
-            StringBuilder md = new StringBuilder();
-            md.AppendLine("# Playtest Change Log");
-            md.AppendLine();
-            for (int i = 0; i < data.entries.Count; i++)
-            {
-                LogEntry e = data.entries[i];
-                string check = e.resolved ? "x" : " ";
-                md.AppendLine($"- [{check}] **[{e.category}]** {e.description}");
-                md.AppendLine($"  - Time: `{e.timestamp}` | Scene: `{e.scene}` | `{e.contextInfo}`");
-                if (e.markers != null && e.markers.Count > 0)
-                {
-                    for (int m = 0; m < e.markers.Count; m++)
-                    {
-                        md.AppendLine($"  - Marker #{m + 1}: `{e.markers[m].label}`");
-                    }
-                }
-                if (!string.IsNullOrEmpty(e.screenshotFile))
-                {
-                    md.AppendLine($"  - Screenshot: `{e.screenshotFile}`");
-                }
-                if (!string.IsNullOrEmpty(e.consoleLogFile))
-                {
-                    md.AppendLine($"  - Console Log: `{e.consoleLogFile}`");
-                }
-                md.AppendLine();
-            }
-            File.WriteAllText(MarkdownFilePath, md.ToString());
-        }
-
-        static void DrawCardOutline(Rect r, Texture2D borderTex)
-        {
-            if (borderTex == null || Event.current.type != EventType.Repaint) return;
-            GUI.DrawTexture(new Rect(r.x, r.y, r.width, 1f), borderTex);
-            GUI.DrawTexture(new Rect(r.x, r.yMax - 1f, r.width, 1f), borderTex);
-            GUI.DrawTexture(new Rect(r.x, r.y, 1f, r.height), borderTex);
-            GUI.DrawTexture(new Rect(r.xMax - 1f, r.y, 1f, r.height), borderTex);
-        }
-
-        void DrawCategoryBadge(string category, float width = 112f)
-        {
-            Rect r = GUILayoutUtility.GetRect(width, 18f, GUILayout.Width(width));
-            r.y += 1f;
-            EditorGUI.DrawRect(r, CategoryColor(category));
-            GUI.Label(r, category, categoryPillStyle);
-        }
-
-        bool DrawInteractiveMarkerImage(
-            string ownerKey,
-            Texture2D cleanTex,
-            List<PinMarker> markers,
-            float maxHeight,
-            out bool markersChanged,
-            out bool dragFinished)
-        {
-            markersChanged = false;
-            dragFinished = false;
-            if (cleanTex == null) return false;
-
-            EnsureStyles();
-
-            float availW = Mathf.Max(200f, position.width - 44f);
-            float aspect = (float)cleanTex.width / Mathf.Max(1, cleanTex.height);
-            float drawH = Mathf.Min(maxHeight, availW / aspect);
-            float drawW = drawH * aspect;
-
-            Rect rowRect = GUILayoutUtility.GetRect(availW, drawH + 8f);
-            EditorGUI.DrawRect(rowRect, new Color(0.08f, 0.09f, 0.11f, 1f));
-            DrawCardOutline(rowRect, cardBorderTex);
-
-            Rect imgRect = new Rect(rowRect.x + (rowRect.width - drawW) * 0.5f, rowRect.y + 4f, drawW, drawH);
-            GUI.DrawTexture(imgRect, cleanTex, ScaleMode.StretchToFill);
-            EditorGUIUtility.AddCursorRect(imgRect, MouseCursor.ArrowPlus);
-
-            Event ev = Event.current;
-            const float hitRadius = 12f;
-
-            if (ev.type == EventType.MouseDown && imgRect.Contains(ev.mousePosition))
-            {
-                int hitIdx = -1;
-                float bestDist = hitRadius;
-                for (int i = 0; i < markers.Count; i++)
-                {
-                    Vector2 mp = MarkerGuiPos(imgRect, markers[i].normalizedPos);
-                    float d = Vector2.Distance(ev.mousePosition, mp);
-                    if (d <= bestDist)
-                    {
-                        bestDist = d;
-                        hitIdx = i;
-                    }
-                }
-
-                if (ev.button == 1)
-                {
-                    if (hitIdx >= 0)
-                    {
-                        markers.RemoveAt(hitIdx);
-                        markersChanged = true;
-                        dragFinished = true;
-                        ev.Use();
-                        Repaint();
-                    }
-                }
-                else if (ev.button == 0)
-                {
-                    if (hitIdx >= 0)
-                    {
-                        draggingOwnerKey = ownerKey;
-                        draggingMarkerIndex = hitIdx;
-                        dragModifiedSavedEntry = false;
-                        ev.Use();
-                    }
-                    else
-                    {
-                        Vector2 norm = GuiToNormalized(imgRect, ev.mousePosition);
-                        string detected = DetectTargetAtNormalizedPoint(norm, new Vector2(cleanTex.width, cleanTex.height), captureSourceIndex == 1);
-                        markers.Add(new PinMarker { normalizedPos = norm, label = detected });
-                        draggingOwnerKey = ownerKey;
-                        draggingMarkerIndex = markers.Count - 1;
-                        dragModifiedSavedEntry = true;
-                        markersChanged = true;
-                        ev.Use();
-                        Repaint();
-                    }
-                }
-            }
-            else if (ev.type == EventType.MouseDrag && draggingOwnerKey == ownerKey && draggingMarkerIndex >= 0 && draggingMarkerIndex < markers.Count)
-            {
-                Vector2 norm = GuiToNormalized(imgRect, ev.mousePosition);
-                markers[draggingMarkerIndex].normalizedPos = norm;
-                markers[draggingMarkerIndex].label = DetectTargetAtNormalizedPoint(norm, new Vector2(cleanTex.width, cleanTex.height), captureSourceIndex == 1);
-                dragModifiedSavedEntry = true;
-                markersChanged = true;
-                ev.Use();
-                Repaint();
-            }
-            else if (ev.type == EventType.MouseUp && draggingOwnerKey == ownerKey)
-            {
-                if (dragModifiedSavedEntry)
-                {
-                    dragFinished = true;
-                }
-                draggingOwnerKey = null;
-                draggingMarkerIndex = -1;
-                dragModifiedSavedEntry = false;
-                ev.Use();
-                Repaint();
-            }
-
-            for (int i = 0; i < markers.Count; i++)
-            {
-                Vector2 pos = MarkerGuiPos(imgRect, markers[i].normalizedPos);
-                Rect shadow = new Rect(pos.x - 9f, pos.y - 8f, 20f, 20f);
-                Rect outer = new Rect(pos.x - 10f, pos.y - 10f, 20f, 20f);
-                Rect inner = new Rect(pos.x - 8f, pos.y - 8f, 16f, 16f);
-                EditorGUI.DrawRect(shadow, new Color(0f, 0f, 0f, 0.45f));
-                EditorGUI.DrawRect(outer, new Color(1f, 0.92f, 0.28f, 1f));
-                EditorGUI.DrawRect(inner, new Color(0.92f, 0.18f, 0.20f, 1f));
-                GUI.Label(outer, (i + 1).ToString(), pinBadgeStyle);
-                EditorGUIUtility.AddCursorRect(outer, MouseCursor.MoveArrow);
-            }
-
+            DestroyDraftTexture();
+            draftTex = capture;
+            draftPng = capture.EncodeToPNG();
+            draftSource = source;
+            draftNeedsRetake = false;
             return true;
         }
 
-        static Vector2 MarkerGuiPos(Rect imgRect, Vector2 normBottomLeft)
+        void DestroyDraftTexture()
         {
-            return new Vector2(
-                imgRect.x + normBottomLeft.x * imgRect.width,
-                imgRect.y + (1f - normBottomLeft.y) * imgRect.height
-            );
+            if (draftTex != null) DestroyImmediate(draftTex);
+            draftTex = null;
+            draftPng = null;
         }
 
-        static Vector2 GuiToNormalized(Rect imgRect, Vector2 mousePos)
+        void StashDraftImage()
         {
-            return new Vector2(
-                Mathf.Clamp01((mousePos.x - imgRect.x) / Mathf.Max(1f, imgRect.width)),
-                Mathf.Clamp01(1f - (mousePos.y - imgRect.y) / Mathf.Max(1f, imgRect.height))
-            );
+            if (draftPng == null) return;
+            Directory.CreateDirectory(Path.GetDirectoryName(DraftImagePath));
+            File.WriteAllBytes(DraftImagePath, draftPng);
         }
 
-        void DrawMarkersEditorList(List<PinMarker> markers, out bool modified)
+        void RestoreDraftImage()
         {
-            modified = false;
-            if (markers == null || markers.Count == 0) return;
-
-            GUILayout.Space(3f);
-            for (int m = 0; m < markers.Count; m++)
+            if (draftTex != null || !File.Exists(DraftImagePath)) return;
+            byte[] png = File.ReadAllBytes(DraftImagePath);
+            Texture2D tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+            if (tex.LoadImage(png))
             {
-                EditorGUILayout.BeginHorizontal();
-                Rect badge = GUILayoutUtility.GetRect(22f, 18f, GUILayout.Width(22f));
-                badge.y += 1f;
-                EditorGUI.DrawRect(badge, new Color(0.90f, 0.20f, 0.22f, 1f));
-                GUI.Label(badge, (m + 1).ToString(), pinBadgeStyle);
-
-                string nextLabel = EditorGUILayout.TextField(markers[m].label ?? "");
-                if (nextLabel != markers[m].label)
-                {
-                    markers[m].label = nextLabel;
-                    modified = true;
-                }
-                if (GUILayout.Button("×", subtleBtnStyle, GUILayout.Width(24f)))
-                {
-                    markers.RemoveAt(m);
-                    modified = true;
-                    EditorGUILayout.EndHorizontal();
-                    break;
-                }
-                EditorGUILayout.EndHorizontal();
+                draftTex = tex;
+                draftPng = png;
+            }
+            else
+            {
+                DestroyImmediate(tex);
             }
         }
 
-        void ShowMoreActionsMenu()
+        void ReloadEntries()
         {
-            GenericMenu menu = new GenericMenu();
-            menu.AddItem(new GUIContent("Quick Screenshot Now"), false, () =>
-            {
-                CaptureDraftPreview();
-                SaveDraftEntry(true);
-            });
-            menu.AddSeparator("");
-            menu.AddItem(new GUIContent("Auto-Retake When Switching Scene or Game Tab"), autoSyncActiveView, () =>
-            {
-                autoSyncActiveView = !autoSyncActiveView;
-            });
-            menu.AddItem(new GUIContent("Pause Play Mode on F1 Capture"), pauseOnQuickCapture, () =>
-            {
-                pauseOnQuickCapture = !pauseOnQuickCapture;
-            });
-            menu.AddSeparator("");
-            menu.AddItem(new GUIContent("Open PlaytestLogs Folder"), false, () =>
-            {
-                Directory.CreateDirectory(LogsRootDir);
-                EditorUtility.RevealInFinder(LogsRootDir);
-            });
-            menu.AddItem(new GUIContent("Open changes.md Markdown"), false, () =>
-            {
-                if (!File.Exists(MarkdownFilePath)) PersistCollection(collection);
-                UnityEditorInternal.InternalEditorUtility.OpenFileAtLineExternal(MarkdownFilePath, 1);
-            });
-            menu.ShowAsContext();
+            collection = PlaytestLogStore.Load();
         }
+
+        void SaveDraftEntry()
+        {
+            if (AttachScreenshot.Value && draftTex == null) CaptureDraft();
+            Texture2D shot = AttachScreenshot.Value ? draftTex : null;
+            AddEntry(PlaytestCategories.Names[newCategoryIndex], newDescription, shot, draftPng, draftSource, draftMarkers);
+
+            newDescription = "";
+            draftMarkers.Clear();
+            categoryPickedManually = false;
+            GUIUtility.keyboardControl = 0; // otherwise the focused text area keeps showing the old text
+            ShowBanner("Saved entry to PlaytestLogs/changes.md");
+        }
+
+        // Saves a separate capture without touching the draft the user may be annotating.
+        void SaveQuickScreenshot()
+        {
+            Texture2D shot = PlaytestCapture.Capture(captureSource, out CaptureSource actual);
+            if (shot == null)
+            {
+                ShowBanner("No Game View or Scene View camera to capture");
+                return;
+            }
+            try
+            {
+                AddEntry(QuickScreenshotCategory, "Quick screenshot capture", shot, null, actual, new List<PinMarker>());
+                ShowBanner("Saved quick screenshot");
+            }
+            finally
+            {
+                DestroyImmediate(shot);
+            }
+        }
+
+        void AddEntry(string category, string description, Texture2D shot, byte[] shotPng, CaptureSource source, List<PinMarker> markers)
+        {
+            DateTime now = DateTime.Now;
+            LogEntry entry = new LogEntry
+            {
+                id = PlaytestLogStore.NewId(now),
+                timestamp = PlaytestLogStore.FormatTimestamp(now),
+                category = category,
+                description = string.IsNullOrWhiteSpace(description) ? "(No description)" : description.Trim(),
+                scene = SceneManager.GetActiveScene().name,
+                contextInfo = PlaytestCapture.DescribeContext(),
+                captureSource = source,
+                markers = markers.ConvertAll(m => m.Clone())
+            };
+
+            if (shot != null)
+            {
+                WriteScreenshots(entry, shot, shotPng ?? shot.EncodeToPNG());
+            }
+            if (AttachConsoleLogs.Value)
+            {
+                entry.consoleLogFile = PlaytestLogStore.ConsoleLogPath(entry.id);
+                PlaytestLogStore.WriteText(entry.consoleLogFile, PlaytestLogStore.BuildConsoleSnapshot(entry));
+            }
+
+            ReloadEntries();
+            collection.entries.Insert(0, entry);
+            PlaytestLogStore.Save(collection);
+            expandedEntryId = entry.id;
+        }
+
+        static void WriteScreenshots(LogEntry entry, Texture2D clean, byte[] cleanPng)
+        {
+            entry.cleanScreenshotFile = PlaytestLogStore.CleanScreenshotPath(entry.id);
+            entry.screenshotFile = PlaytestLogStore.ScreenshotPath(entry.id);
+            PlaytestLogStore.WriteBytes(entry.cleanScreenshotFile, cleanPng);
+            PlaytestLogStore.WriteBytes(entry.screenshotFile, PlaytestCapture.BakeMarkers(clean, entry.markers));
+        }
+
+        void RebakeEntryScreenshot(LogEntry entry)
+        {
+            Texture2D clean = GetEntryTexture(entry);
+            if (clean == null) return;
+
+            // Entries without a clean capture only have the annotated PNG. Keep a copy of it as the base image,
+            // otherwise every rebake would draw new pins on top of the previously baked ones.
+            if (!PlaytestLogStore.Exists(entry.cleanScreenshotFile))
+            {
+                entry.cleanScreenshotFile = PlaytestLogStore.CleanScreenshotPath(entry.id);
+                PlaytestLogStore.WriteBytes(entry.cleanScreenshotFile, clean.EncodeToPNG());
+            }
+            if (string.IsNullOrEmpty(entry.screenshotFile))
+            {
+                entry.screenshotFile = PlaytestLogStore.ScreenshotPath(entry.id);
+            }
+            PlaytestLogStore.WriteBytes(entry.screenshotFile, PlaytestCapture.BakeMarkers(clean, entry.markers));
+            PlaytestLogStore.Save(collection);
+        }
+
+        void RetakeEntryScreenshot(LogEntry entry)
+        {
+            Texture2D fresh = PlaytestCapture.Capture(captureSource, out CaptureSource actual);
+            if (fresh == null)
+            {
+                ShowBanner("No Game View or Scene View camera to capture");
+                return;
+            }
+
+            entry.captureSource = actual;
+            WriteScreenshots(entry, fresh, fresh.EncodeToPNG());
+            EvictEntryTexture(entry.id);
+            entryTexCache[entry.id] = fresh;
+            PlaytestLogStore.Save(collection);
+            ShowBanner("Retook screenshot (" + PlaytestCapture.DisplayName(actual) + ")");
+        }
+
+        void DeleteEntry(string entryId)
+        {
+            ReloadEntries();
+            LogEntry entry = collection.entries.Find(e => e.id == entryId);
+            if (entry == null) return;
+            if (!EditorUtility.DisplayDialog("Delete log entry?",
+                    "This removes the entry from changes.md and entries.json and deletes its screenshots and console log.",
+                    "Delete", "Cancel"))
+            {
+                return;
+            }
+
+            collection.entries.Remove(entry);
+            PlaytestLogStore.Save(collection);
+            PlaytestLogStore.DeleteEntryFiles(entry);
+            EvictEntryTexture(entryId);
+            Repaint();
+        }
+
+        Texture2D GetEntryTexture(LogEntry entry)
+        {
+            if (entryTexCache.TryGetValue(entry.id, out Texture2D cached) && cached != null) return cached;
+
+            string rel = PlaytestLogStore.Exists(entry.cleanScreenshotFile) ? entry.cleanScreenshotFile : entry.screenshotFile;
+            if (!PlaytestLogStore.Exists(rel)) return null;
+
+            Texture2D tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+            if (!tex.LoadImage(File.ReadAllBytes(PlaytestLogStore.FullPath(rel))))
+            {
+                DestroyImmediate(tex);
+                return null;
+            }
+            entryTexCache[entry.id] = tex;
+            return tex;
+        }
+
+        void EvictEntryTexture(string entryId)
+        {
+            if (entryTexCache.TryGetValue(entryId, out Texture2D tex) && tex != null) DestroyImmediate(tex);
+            entryTexCache.Remove(entryId);
+        }
+
+        void ClearEntryTextureCache()
+        {
+            foreach (Texture2D tex in entryTexCache.Values)
+            {
+                if (tex != null) DestroyImmediate(tex);
+            }
+            entryTexCache.Clear();
+        }
+
+        static void OpenLogsFolder()
+        {
+            Directory.CreateDirectory(PlaytestLogStore.RootDir);
+            EditorUtility.RevealInFinder(PlaytestLogStore.RootDir);
+        }
+
+        void OpenMarkdown()
+        {
+            if (!File.Exists(PlaytestLogStore.MarkdownPath)) PlaytestLogStore.Save(collection);
+            InternalEditorUtility.OpenFileAtLineExternal(PlaytestLogStore.MarkdownPath, 1);
+        }
+
+        void OpenEntryFile(string relativePath, bool textFile)
+        {
+            if (!PlaytestLogStore.Exists(relativePath))
+            {
+                ShowBanner("File not found: " + relativePath);
+                return;
+            }
+            string full = PlaytestLogStore.FullPath(relativePath);
+            if (textFile) InternalEditorUtility.OpenFileAtLineExternal(full, 1);
+            else Application.OpenURL(new Uri(full).AbsoluteUri);
+        }
+
+        #endregion
+
+        #region GUI
 
         void OnGUI()
         {
-            EnsureStyles();
-
-            if (collection == null)
+            if (styles == null || !styles.IsValid)
             {
-                RefreshEntries();
+                styles?.Dispose();
+                styles = new PlaytestLoggerStyles();
+            }
+            if (collection == null) ReloadEntries();
+
+            DrawHeader();
+
+            if (banner != null)
+            {
+                Rect bannerRect = GUILayoutUtility.GetRect(position.width, 24f);
+                EditorGUI.DrawRect(bannerRect, styles.BannerColor);
+                GUI.Label(new Rect(bannerRect.x + 10f, bannerRect.y + 3f, bannerRect.width - 20f, 18f), "✓  " + banner, EditorStyles.boldLabel);
             }
 
-            int openCount = 0;
-            for (int i = 0; i < collection.entries.Count; i++)
-            {
-                if (!collection.entries[i].resolved) openCount++;
-            }
+            if (tab == Tab.NewEntry) DrawNewEntryTab();
+            else DrawSavedEntriesTab();
+        }
 
-            // Polished Top Navigation Bar (Zero '/' characters so zero unwanted submenus)
-            EditorGUILayout.BeginVertical(headerBarStyle);
+        void DrawHeader()
+        {
+            int openCount = collection.entries.FindAll(e => !e.resolved).Count;
+
+            EditorGUILayout.BeginVertical(styles.HeaderBar);
             EditorGUILayout.BeginHorizontal();
-
-            if (GUILayout.Button("+ New Entry", actionIndex == 0 ? tabActiveStyle : tabInactiveStyle, GUILayout.Height(25f)))
+            if (GUILayout.Button("+ New Entry", tab == Tab.NewEntry ? styles.TabActive : styles.TabInactive))
             {
-                actionIndex = 0;
-                if (draftCleanTex == null) CaptureDraftPreview();
+                tab = Tab.NewEntry;
+                bool retake = draftTex == null || (draftNeedsRetake && draftMarkers.Count == 0);
+                draftNeedsRetake = false;
+                if (retake) CaptureDraft();
             }
-            string savedTabLabel = $"Saved Entries ({openCount} open • {collection.entries.Count} total)";
-            if (GUILayout.Button(savedTabLabel, actionIndex == 1 ? tabActiveStyle : tabInactiveStyle, GUILayout.Height(25f)))
+            string savedLabel = $"Saved Entries ({openCount} open • {collection.entries.Count} total)";
+            if (GUILayout.Button(savedLabel, tab == Tab.SavedEntries ? styles.TabActive : styles.TabInactive))
             {
-                actionIndex = 1;
-                RefreshEntries();
+                tab = Tab.SavedEntries;
+                ReloadEntries();
             }
-
-            if (GUILayout.Button("Actions ▾", subtleBtnStyle, GUILayout.Width(74f), GUILayout.Height(25f)))
+            if (GUILayout.Button("Actions ▾", styles.SubtleButton, GUILayout.Width(74f), GUILayout.Height(25f)))
             {
-                ShowMoreActionsMenu();
+                ShowActionsMenu();
             }
             EditorGUILayout.EndHorizontal();
 
             GUILayout.Space(6f);
 
-            // Capture Source Bar — switching between Game View and Scene View automatically retakes the screenshot
             EditorGUILayout.BeginHorizontal();
             GUILayout.Label("View:", EditorStyles.miniBoldLabel, GUILayout.Width(36f));
-            int nextSource = GUILayout.Toolbar(captureSourceIndex, CaptureSources, EditorStyles.miniButton);
-            if (nextSource != captureSourceIndex)
+            CaptureSource nextSource = (CaptureSource)GUILayout.Toolbar((int)captureSource, CaptureSourceLabels, EditorStyles.miniButton);
+            if (nextSource != captureSource)
             {
-                captureSourceIndex = nextSource;
-                CaptureDraftPreview();
-                ShowBanner("Switched to " + CaptureSources[captureSourceIndex] + " & retook screenshot");
+                captureSource = nextSource;
+                CaptureDraft();
+                ShowBanner("Switched to " + PlaytestCapture.DisplayName(captureSource) + " & retook screenshot");
             }
-
-            autoSyncActiveView = GUILayout.Toggle(autoSyncActiveView, new GUIContent("Auto", "Automatically retake screenshot when switching between Scene View and Game View tabs"), EditorStyles.miniButton, GUILayout.Width(46f));
-
-            if (GUILayout.Button("Retake (F1)", subtleBtnStyle, GUILayout.Width(82f)))
+            AutoSyncActiveView.Value = GUILayout.Toggle(AutoSyncActiveView.Value,
+                new GUIContent("Auto", "Automatically retake the screenshot when switching between Scene View and Game View tabs (skipped once the draft has pins)"),
+                EditorStyles.miniButton, GUILayout.Width(46f));
+            if (GUILayout.Button("Retake (F1)", styles.SubtleButton, GUILayout.Width(82f)))
             {
-                CaptureDraftPreview();
-                ShowBanner("Captured " + CaptureSources[captureSourceIndex]);
+                if (SetDraft(PlaytestCapture.Capture(captureSource, out CaptureSource actual), actual))
+                {
+                    ShowBanner("Captured " + PlaytestCapture.DisplayName(actual));
+                }
             }
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.EndVertical();
-
-            DrawCardOutline(GUILayoutUtility.GetLastRect(), cardBorderTex);
-
-            if (EditorApplication.timeSinceStartup < statusBannerUntil && !string.IsNullOrEmpty(statusBanner))
-            {
-                Rect bannerRect = GUILayoutUtility.GetRect(position.width, 24f);
-                EditorGUI.DrawRect(bannerRect, new Color(0.16f, 0.34f, 0.24f, 0.95f));
-                GUI.Label(new Rect(bannerRect.x + 10f, bannerRect.y + 3f, bannerRect.width - 20f, 18f), "✓  " + statusBanner, EditorStyles.boldLabel);
-            }
-
-            if (actionIndex == 0)
-            {
-                DrawNewEntryView();
-            }
-            else
-            {
-                DrawSavedEntriesView();
-            }
+            DrawOutline(GUILayoutUtility.GetLastRect());
         }
 
-        void DrawNewEntryView()
+        void ShowActionsMenu()
+        {
+            GenericMenu menu = new GenericMenu();
+            menu.AddItem(new GUIContent("Quick Screenshot Now"), false, SaveQuickScreenshot);
+            menu.AddSeparator("");
+            menu.AddItem(new GUIContent("Pause Play Mode on F1 Capture"), PauseOnQuickCapture.Value,
+                () => PauseOnQuickCapture.Value = !PauseOnQuickCapture.Value);
+            menu.AddSeparator("");
+            menu.AddItem(new GUIContent("Open PlaytestLogs Folder"), false, OpenLogsFolder);
+            menu.AddItem(new GUIContent("Open changes.md Markdown"), false, OpenMarkdown);
+            menu.ShowAsContext();
+        }
+
+        void DrawNewEntryTab()
         {
             Event ev = Event.current;
-            if (ev.type == EventType.KeyDown && (ev.command || ev.control) && ev.keyCode == KeyCode.Return)
+            if (ev.type == EventType.KeyDown && (ev.command || ev.control) && (ev.keyCode == KeyCode.Return || ev.keyCode == KeyCode.KeypadEnter))
             {
-                SaveDraftEntry(false);
                 ev.Use();
+                SaveDraftEntry();
                 return;
             }
 
             formScroll = EditorGUILayout.BeginScrollView(formScroll);
             GUILayout.Space(4f);
+            Rect cardRect = EditorGUILayout.BeginVertical(styles.Card);
+            DrawOutline(cardRect);
 
-            Rect cardRect = EditorGUILayout.BeginVertical(cardStyle);
-            DrawCardOutline(cardRect, cardBorderTex);
-
-            // Category Row
             EditorGUILayout.BeginHorizontal();
-            GUILayout.Label("Category", sectionTitleStyle, GUILayout.Width(64f));
-            DrawCategoryBadge(Categories[newCategoryIndex], 116f);
-            newCategoryIndex = EditorGUILayout.Popup(newCategoryIndex, Categories);
+            GUILayout.Label("Category", styles.SectionTitle, GUILayout.Width(64f));
+            DrawCategoryBadge(PlaytestCategories.Names[newCategoryIndex], 116f);
+            int nextCategory = EditorGUILayout.Popup(newCategoryIndex, PlaytestCategories.Names);
+            if (nextCategory != newCategoryIndex)
+            {
+                newCategoryIndex = nextCategory;
+                categoryPickedManually = true;
+            }
             EditorGUILayout.EndHorizontal();
 
             GUILayout.Space(8f);
 
-            // Interactive Screenshot Card
-            if (draftCleanTex == null)
+            if (draftTex == null)
             {
                 EditorGUILayout.HelpBox("Press F1 or click 'Retake (F1)' above to capture a screenshot.", MessageType.None);
             }
             else
             {
-                DrawInteractiveMarkerImage("draft", draftCleanTex, draftMarkers, 235f, out bool markersChanged, out _);
-                if (markersChanged && draftMarkers.Count > 0 && draftMarkers[draftMarkers.Count - 1].label.StartsWith("UI:"))
+                MarkerEdit edit = DrawMarkerImage(draftTex, draftMarkers, draftSource, 235f);
+                bool pinnedUi = edit == MarkerEdit.Added && draftMarkers[draftMarkers.Count - 1].label.StartsWith("UI:");
+                if (pinnedUi && !categoryPickedManually)
                 {
-                    newCategoryIndex = 0;
+                    newCategoryIndex = PlaytestCategories.IndexOf(PlaytestCategories.UI);
                 }
 
                 EditorGUILayout.BeginHorizontal();
                 GUILayout.Label("Click image to add pin  •  Drag pin to adjust  •  Right-click pin to delete", EditorStyles.miniLabel);
                 GUILayout.FlexibleSpace();
-                if (draftMarkers.Count > 0 && GUILayout.Button("Clear Pins", subtleBtnStyle, GUILayout.Width(72f)))
+                if (draftMarkers.Count > 0 && GUILayout.Button("Clear Pins", styles.SubtleButton, GUILayout.Width(72f)))
                 {
                     draftMarkers.Clear();
                 }
                 EditorGUILayout.EndHorizontal();
 
-                DrawMarkersEditorList(draftMarkers, out _);
+                DrawMarkerList(draftMarkers);
             }
 
             GUILayout.Space(8f);
-
-            // Description
-            GUILayout.Label("Description", sectionTitleStyle);
+            GUILayout.Label("Description", styles.SectionTitle);
             GUILayout.Space(2f);
-            newDescription = EditorGUILayout.TextArea(newDescription, textAreaStyle, GUILayout.MinHeight(78f));
+            newDescription = EditorGUILayout.TextArea(newDescription, styles.TextArea, GUILayout.MinHeight(78f));
 
             GUILayout.Space(8f);
-
-            // Options + Primary Save Button
             EditorGUILayout.BeginHorizontal();
-            includeScreenshot = EditorGUILayout.ToggleLeft("Attach Screenshot", includeScreenshot, GUILayout.Width(130f));
-            includeLogs = EditorGUILayout.ToggleLeft("Attach Console Logs", includeLogs, GUILayout.Width(145f));
+            AttachScreenshot.Value = EditorGUILayout.ToggleLeft("Attach Screenshot", AttachScreenshot.Value, GUILayout.Width(130f));
+            AttachConsoleLogs.Value = EditorGUILayout.ToggleLeft("Attach Console Logs", AttachConsoleLogs.Value, GUILayout.Width(145f));
             EditorGUILayout.EndHorizontal();
 
             GUILayout.Space(8f);
-            if (GUILayout.Button("Save Log Entry   (Cmd / Ctrl + Enter)", primaryBtnStyle, GUILayout.Height(32f)))
+            if (GUILayout.Button("Save Log Entry   (Cmd / Ctrl + Enter)", styles.PrimaryButton, GUILayout.Height(32f)))
             {
-                SaveDraftEntry(false);
+                SaveDraftEntry();
             }
 
             EditorGUILayout.EndVertical();
@@ -1272,70 +620,28 @@ namespace PlaytestLoggerTool
             EditorGUILayout.EndScrollView();
         }
 
-        static string BuildShortSummary(string text, int maxLen = 42)
+        void DrawSavedEntriesTab()
         {
-            if (string.IsNullOrWhiteSpace(text)) return "(No description)";
-            string singleLine = text.Replace("\r", " ").Replace("\n", " ").Trim();
-            return singleLine.Length <= maxLen ? singleLine : singleLine.Substring(0, maxLen - 1) + "…";
-        }
+            List<LogEntry> visible = HideResolved.Value ? collection.entries.FindAll(e => !e.resolved) : collection.entries;
 
-        void DrawSavedEntriesView()
-        {
-            // Filter + Quick-Select Entry Dropdown Bar
-            EditorGUILayout.BeginVertical(cardStyle);
-            List<LogEntry> visibleEntries = new List<LogEntry>();
-            for (int i = 0; i < collection.entries.Count; i++)
-            {
-                if (!hideResolved || !collection.entries[i].resolved)
-                {
-                    visibleEntries.Add(collection.entries[i]);
-                }
-            }
-
-            if (visibleEntries.Count > 0)
-            {
-                string[] dropdownLabels = new string[visibleEntries.Count];
-                int selectedDropdownIdx = 0;
-                for (int i = 0; i < visibleEntries.Count; i++)
-                {
-                    LogEntry ve = visibleEntries[i];
-                    string statusPrefix = ve.resolved ? "[Done] " : "";
-                    // Strip '/' so Unity Popup never splits user descriptions into submenus
-                    string safeSummary = BuildShortSummary(ve.description, 38).Replace("/", "⁄");
-                    dropdownLabels[i] = $"{i + 1}. {statusPrefix}[{ve.category}] {safeSummary}";
-                    if (ve.id == expandedEntryId)
-                    {
-                        selectedDropdownIdx = i;
-                    }
-                }
-
-                EditorGUILayout.BeginHorizontal();
-                GUILayout.Label("Select Entry:", sectionTitleStyle, GUILayout.Width(82f));
-                int nextSelected = EditorGUILayout.Popup(selectedDropdownIdx, dropdownLabels);
-                if (nextSelected != selectedDropdownIdx && nextSelected >= 0 && nextSelected < visibleEntries.Count)
-                {
-                    expandedEntryId = visibleEntries[nextSelected].id;
-                }
-                EditorGUILayout.EndHorizontal();
-                GUILayout.Space(4f);
-            }
+            EditorGUILayout.BeginVertical(styles.Card);
+            if (visible.Count > 0) DrawEntryPicker(visible);
 
             EditorGUILayout.BeginHorizontal();
-            hideResolved = EditorGUILayout.ToggleLeft("Hide Done Entries", hideResolved, GUILayout.Width(135f));
+            HideResolved.Value = EditorGUILayout.ToggleLeft("Hide Done Entries", HideResolved.Value, GUILayout.Width(135f));
             GUILayout.FlexibleSpace();
-            if (GUILayout.Button("Collapse All", subtleBtnStyle, GUILayout.Width(84f)))
+            if (GUILayout.Button("Collapse All", styles.SubtleButton, GUILayout.Width(84f)))
             {
                 expandedEntryId = "";
             }
-            if (GUILayout.Button("Open Folder", subtleBtnStyle, GUILayout.Width(86f)))
+            if (GUILayout.Button("Open Folder", styles.SubtleButton, GUILayout.Width(86f)))
             {
-                Directory.CreateDirectory(LogsRootDir);
-                EditorUtility.RevealInFinder(LogsRootDir);
+                OpenLogsFolder();
             }
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.EndVertical();
 
-            if (visibleEntries.Count == 0)
+            if (visible.Count == 0)
             {
                 GUILayout.Space(8f);
                 EditorGUILayout.HelpBox("No matching saved entries. Switch to '+ New Entry' or press F1 to log an issue.", MessageType.Info);
@@ -1343,134 +649,332 @@ namespace PlaytestLoggerTool
             }
 
             savedScroll = EditorGUILayout.BeginScrollView(savedScroll);
-            for (int i = 0; i < collection.entries.Count; i++)
+            foreach (LogEntry entry in visible)
             {
-                LogEntry e = collection.entries[i];
-                if (hideResolved && e.resolved)
-                {
-                    continue;
-                }
-
-                bool isExpanded = e.id == expandedEntryId;
-                Rect cardRect = EditorGUILayout.BeginVertical(cardStyle);
-                DrawCardOutline(cardRect, cardBorderTex);
-
-                // Collapsible Dropdown Header Row
-                EditorGUILayout.BeginHorizontal();
-                bool nextDone = EditorGUILayout.Toggle(e.resolved, GUILayout.Width(16f));
-                if (nextDone != e.resolved)
-                {
-                    e.resolved = nextDone;
-                    PersistCollection(collection);
-                }
-
-                string arrow = isExpanded ? "▾ " : "▸ ";
-                DrawCategoryBadge(e.category, 108f);
-
-                string headerTitle = arrow + BuildShortSummary(e.description, 46);
-                if (GUILayout.Button(headerTitle, rowHeaderBtnStyle, GUILayout.ExpandWidth(true), GUILayout.Height(20f)))
-                {
-                    expandedEntryId = isExpanded ? "" : e.id;
-                    isExpanded = !isExpanded;
-                }
-
-                string shortTime = !string.IsNullOrEmpty(e.timestamp) && e.timestamp.Length >= 16
-                    ? e.timestamp.Substring(11, 5)
-                    : e.timestamp;
-                GUILayout.Label(shortTime, EditorStyles.miniLabel, GUILayout.Width(38f));
-                EditorGUILayout.EndHorizontal();
-
-                // Expanded Dropdown Details
-                if (isExpanded)
-                {
-                    GUILayout.Space(8f);
-                    Rect divider = GUILayoutUtility.GetRect(10f, 1f, GUILayout.ExpandWidth(true));
-                    EditorGUI.DrawRect(divider, cardBorderTex != null ? new Color(0.28f, 0.30f, 0.36f) : Color.gray);
-                    GUILayout.Space(6f);
-
-                    EditorGUILayout.BeginHorizontal();
-                    GUILayout.Label("Category:", EditorStyles.miniBoldLabel, GUILayout.Width(60f));
-                    int curCat = Mathf.Max(0, Array.IndexOf(Categories, e.category));
-                    int nextCat = EditorGUILayout.Popup(curCat, Categories, GUILayout.Width(145f));
-                    if (nextCat != curCat)
-                    {
-                        e.category = Categories[nextCat];
-                        PersistCollection(collection);
-                    }
-                    GUILayout.FlexibleSpace();
-                    GUILayout.Label($"{e.timestamp}  •  {e.scene}", EditorStyles.miniLabel);
-                    EditorGUILayout.EndHorizontal();
-
-                    if (!string.IsNullOrEmpty(e.contextInfo))
-                    {
-                        EditorGUILayout.LabelField(e.contextInfo, EditorStyles.miniLabel);
-                    }
-
-                    GUILayout.Space(4f);
-                    GUILayout.Label("Description", EditorStyles.miniBoldLabel);
-                    string nextDesc = EditorGUILayout.TextArea(e.description ?? "", textAreaStyle, GUILayout.MinHeight(56f));
-                    if (nextDesc != e.description)
-                    {
-                        e.description = nextDesc;
-                        PersistCollection(collection);
-                    }
-
-                    Texture2D cleanTex = GetCleanTextureForEntry(e);
-                    if (cleanTex != null)
-                    {
-                        GUILayout.Space(6f);
-                        DrawInteractiveMarkerImage(
-                            "entry_" + e.id,
-                            cleanTex,
-                            e.markers,
-                            215f,
-                            out _,
-                            out bool finishedMarkerChange);
-
-                        EditorGUILayout.LabelField("Click to add pin  •  Drag pin to adjust  •  Right-click pin to remove", EditorStyles.miniLabel);
-                        DrawMarkersEditorList(e.markers, out bool labelOrDeleteChanged);
-
-                        if (finishedMarkerChange || labelOrDeleteChanged)
-                        {
-                            RebakeSavedEntryScreenshot(e);
-                        }
-                    }
-
-                    GUILayout.Space(8f);
-                    EditorGUILayout.BeginHorizontal();
-                    if (GUILayout.Button("Retake Screenshot", subtleBtnStyle, GUILayout.Width(122f)))
-                    {
-                        RetakeSavedEntryScreenshot(e);
-                    }
-                    if (!string.IsNullOrEmpty(e.screenshotFile) && GUILayout.Button("Open PNG", subtleBtnStyle, GUILayout.Width(76f)))
-                    {
-                        string shotFull = Path.Combine(LogsRootDir, e.screenshotFile);
-                        if (File.Exists(shotFull)) Application.OpenURL("file://" + shotFull);
-                    }
-                    if (!string.IsNullOrEmpty(e.consoleLogFile) && GUILayout.Button("Console Log", subtleBtnStyle, GUILayout.Width(86f)))
-                    {
-                        string logPath = Path.Combine(LogsRootDir, e.consoleLogFile);
-                        if (File.Exists(logPath))
-                        {
-                            UnityEditorInternal.InternalEditorUtility.OpenFileAtLineExternal(logPath, 1);
-                        }
-                    }
-                    GUILayout.FlexibleSpace();
-                    if (GUILayout.Button("Delete", subtleBtnStyle, GUILayout.Width(60f)))
-                    {
-                        collection.entries.RemoveAt(i);
-                        PersistCollection(collection);
-                        EditorGUILayout.EndHorizontal();
-                        EditorGUILayout.EndVertical();
-                        break;
-                    }
-                    EditorGUILayout.EndHorizontal();
-                }
-
-                EditorGUILayout.EndVertical();
+                DrawEntryCard(entry);
             }
             GUILayout.Space(6f);
             EditorGUILayout.EndScrollView();
         }
+
+        void DrawEntryPicker(List<LogEntry> visible)
+        {
+            string[] labels = new string[visible.Count];
+            int selected = -1;
+            for (int i = 0; i < visible.Count; i++)
+            {
+                LogEntry e = visible[i];
+                // Swap '/' for a look-alike so Unity's popup doesn't split descriptions into submenus.
+                string summary = Summarize(e.description, 38).Replace("/", "⁄");
+                labels[i] = $"{i + 1}. {(e.resolved ? "[Done] " : "")}[{e.category}] {summary}";
+                if (e.id == expandedEntryId) selected = i;
+            }
+
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Label("Select Entry:", styles.SectionTitle, GUILayout.Width(82f));
+            int next = EditorGUILayout.Popup(selected, labels);
+            if (next != selected && next >= 0)
+            {
+                expandedEntryId = visible[next].id;
+                scrollToExpandedEntry = true;
+            }
+            EditorGUILayout.EndHorizontal();
+            GUILayout.Space(4f);
+        }
+
+        void DrawEntryCard(LogEntry e)
+        {
+            bool isExpanded = e.id == expandedEntryId;
+            Rect cardRect = EditorGUILayout.BeginVertical(styles.Card);
+            DrawOutline(cardRect);
+            if (isExpanded && scrollToExpandedEntry && Event.current.type == EventType.Repaint)
+            {
+                scrollToExpandedEntry = false;
+                savedScroll.y = cardRect.y;
+                Repaint();
+            }
+
+            EditorGUILayout.BeginHorizontal();
+            bool resolved = EditorGUILayout.Toggle(e.resolved, GUILayout.Width(16f));
+            if (resolved != e.resolved)
+            {
+                e.resolved = resolved;
+                PlaytestLogStore.Save(collection);
+            }
+            DrawCategoryBadge(e.category, 108f);
+            string title = (isExpanded ? "▾ " : "▸ ") + Summarize(e.description, 46);
+            if (GUILayout.Button(title, styles.RowHeader, GUILayout.ExpandWidth(true), GUILayout.Height(20f)))
+            {
+                expandedEntryId = isExpanded ? "" : e.id;
+                isExpanded = !isExpanded;
+            }
+            string shortTime = e.timestamp != null && e.timestamp.Length >= 16 ? e.timestamp.Substring(11, 5) : e.timestamp;
+            GUILayout.Label(shortTime, EditorStyles.miniLabel, GUILayout.Width(38f));
+            EditorGUILayout.EndHorizontal();
+
+            if (isExpanded) DrawEntryDetails(e);
+
+            EditorGUILayout.EndVertical();
+        }
+
+        void DrawEntryDetails(LogEntry e)
+        {
+            GUILayout.Space(8f);
+            EditorGUI.DrawRect(GUILayoutUtility.GetRect(10f, 1f, GUILayout.ExpandWidth(true)), styles.BorderColor);
+            GUILayout.Space(6f);
+
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Label("Category:", EditorStyles.miniBoldLabel, GUILayout.Width(60f));
+            int category = PlaytestCategories.IndexOf(e.category);
+            int nextCategory = EditorGUILayout.Popup(category, PlaytestCategories.Names, GUILayout.Width(145f));
+            if (nextCategory != category)
+            {
+                e.category = PlaytestCategories.Names[nextCategory];
+                PlaytestLogStore.Save(collection);
+            }
+            GUILayout.FlexibleSpace();
+            GUILayout.Label($"{e.timestamp}  •  {e.scene}", EditorStyles.miniLabel);
+            EditorGUILayout.EndHorizontal();
+
+            if (!string.IsNullOrEmpty(e.contextInfo))
+            {
+                EditorGUILayout.LabelField(e.contextInfo, EditorStyles.miniLabel);
+            }
+
+            GUILayout.Space(4f);
+            GUILayout.Label("Description", EditorStyles.miniBoldLabel);
+            string description = EditorGUILayout.TextArea(e.description ?? "", styles.TextArea, GUILayout.MinHeight(56f));
+            if (description != e.description)
+            {
+                e.description = description;
+                PlaytestLogStore.Save(collection);
+            }
+
+            Texture2D tex = GetEntryTexture(e);
+            if (tex != null)
+            {
+                GUILayout.Space(6f);
+                bool pinsChanged = DrawMarkerImage(tex, e.markers, e.captureSource, 215f) != MarkerEdit.None;
+                EditorGUILayout.LabelField("Click to add pin  •  Drag pin to adjust  •  Right-click pin to remove", EditorStyles.miniLabel);
+                MarkerEdit listEdit = DrawMarkerList(e.markers);
+
+                // Labels aren't drawn on the PNG, so label edits only need the JSON/Markdown updated.
+                if (pinsChanged || listEdit == MarkerEdit.Removed) RebakeEntryScreenshot(e);
+                else if (listEdit != MarkerEdit.None) PlaytestLogStore.Save(collection);
+            }
+
+            GUILayout.Space(8f);
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("Retake Screenshot", styles.SubtleButton, GUILayout.Width(122f)))
+            {
+                RetakeEntryScreenshot(e);
+            }
+            if (!string.IsNullOrEmpty(e.screenshotFile) && GUILayout.Button("Open PNG", styles.SubtleButton, GUILayout.Width(76f)))
+            {
+                OpenEntryFile(e.screenshotFile, false);
+            }
+            if (!string.IsNullOrEmpty(e.consoleLogFile) && GUILayout.Button("Console Log", styles.SubtleButton, GUILayout.Width(86f)))
+            {
+                OpenEntryFile(e.consoleLogFile, true);
+            }
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button("Delete", styles.SubtleButton, GUILayout.Width(60f)))
+            {
+                // Deferred: removing entries (and showing a modal) mid-layout breaks IMGUI's layout pass.
+                string id = e.id;
+                EditorApplication.delayCall += () =>
+                {
+                    if (this != null) DeleteEntry(id);
+                };
+            }
+            EditorGUILayout.EndHorizontal();
+        }
+
+        /// <summary>Draws a capture with its pins and handles add/drag/remove. Returns the committed edit, if any.</summary>
+        MarkerEdit DrawMarkerImage(Texture2D tex, List<PinMarker> markers, CaptureSource source, float maxHeight)
+        {
+            float availableWidth = Mathf.Max(200f, position.width - ImageSidePadding);
+            float aspect = (float)tex.width / Mathf.Max(1, tex.height);
+            float drawH = Mathf.Min(maxHeight, availableWidth / aspect);
+            float drawW = drawH * aspect;
+
+            Rect rowRect = GUILayoutUtility.GetRect(availableWidth, drawH + 8f);
+            EditorGUI.DrawRect(rowRect, styles.ImageBackground);
+            DrawOutline(rowRect);
+            Rect imgRect = new Rect(rowRect.x + (rowRect.width - drawW) * 0.5f, rowRect.y + 4f, drawW, drawH);
+            GUI.DrawTexture(imgRect, tex, ScaleMode.StretchToFill);
+            EditorGUIUtility.AddCursorRect(imgRect, MouseCursor.ArrowPlus);
+
+            MarkerEdit edit = HandleMarkerInput(imgRect, new Vector2(tex.width, tex.height), markers, source);
+
+            for (int i = 0; i < markers.Count; i++)
+            {
+                Vector2 pos = NormalizedToGui(imgRect, markers[i].normalizedPos);
+                Rect outer = new Rect(pos.x - 10f, pos.y - 10f, 20f, 20f);
+                EditorGUI.DrawRect(new Rect(pos.x - 9f, pos.y - 8f, 20f, 20f), styles.PinShadow);
+                EditorGUI.DrawRect(outer, styles.PinOutline);
+                EditorGUI.DrawRect(new Rect(pos.x - 8f, pos.y - 8f, 16f, 16f), styles.PinFill);
+                GUI.Label(outer, (i + 1).ToString(), styles.PinBadge);
+                EditorGUIUtility.AddCursorRect(outer, MouseCursor.MoveArrow);
+            }
+            return edit;
+        }
+
+        MarkerEdit HandleMarkerInput(Rect imgRect, Vector2 imageSize, List<PinMarker> markers, CaptureSource source)
+        {
+            MarkerEdit edit = ProcessMarkerEvent(imgRect, imageSize, markers, source);
+            if (Event.current.type == EventType.Used) Repaint();
+            return edit;
+        }
+
+        MarkerEdit ProcessMarkerEvent(Rect imgRect, Vector2 imageSize, List<PinMarker> markers, CaptureSource source)
+        {
+            // hotControl keeps drag/up events coming to us even when the mouse leaves the image or window.
+            int controlId = GUIUtility.GetControlID(FocusType.Passive);
+            Event ev = Event.current;
+
+            switch (ev.GetTypeForControl(controlId))
+            {
+                case EventType.MouseDown when imgRect.Contains(ev.mousePosition):
+                {
+                    int hit = HitTestMarker(imgRect, markers, ev.mousePosition);
+                    if (ev.button == 1 && hit >= 0)
+                    {
+                        markers.RemoveAt(hit);
+                        ev.Use();
+                        return MarkerEdit.Removed;
+                    }
+                    if (ev.button != 0) return MarkerEdit.None;
+
+                    MarkerEdit edit = MarkerEdit.None;
+                    if (hit < 0)
+                    {
+                        Vector2 norm = GuiToNormalized(imgRect, ev.mousePosition);
+                        markers.Add(new PinMarker { normalizedPos = norm, label = PlaytestCapture.DescribePoint(norm, imageSize, source) });
+                        hit = markers.Count - 1;
+                        edit = MarkerEdit.Added;
+                    }
+                    GUIUtility.hotControl = controlId;
+                    draggingMarkerIndex = hit;
+                    dragMoved = false;
+                    ev.Use();
+                    return edit;
+                }
+                case EventType.MouseDrag when GUIUtility.hotControl == controlId:
+                    if (draggingMarkerIndex >= 0 && draggingMarkerIndex < markers.Count)
+                    {
+                        markers[draggingMarkerIndex].normalizedPos = GuiToNormalized(imgRect, ev.mousePosition);
+                        dragMoved = true;
+                    }
+                    ev.Use();
+                    return MarkerEdit.None;
+                case EventType.MouseUp when GUIUtility.hotControl == controlId:
+                {
+                    GUIUtility.hotControl = 0;
+                    ev.Use();
+                    bool moved = dragMoved && draggingMarkerIndex >= 0 && draggingMarkerIndex < markers.Count;
+                    if (moved)
+                    {
+                        // Re-detect only once the pin is dropped; detection walks every canvas in the scene.
+                        PinMarker marker = markers[draggingMarkerIndex];
+                        marker.label = PlaytestCapture.DescribePoint(marker.normalizedPos, imageSize, source);
+                    }
+                    draggingMarkerIndex = -1;
+                    dragMoved = false;
+                    return moved ? MarkerEdit.Moved : MarkerEdit.None;
+                }
+                default:
+                    return MarkerEdit.None;
+            }
+        }
+
+        static int HitTestMarker(Rect imgRect, List<PinMarker> markers, Vector2 mousePos)
+        {
+            int hit = -1;
+            float best = PinHitRadius;
+            for (int i = 0; i < markers.Count; i++)
+            {
+                float d = Vector2.Distance(mousePos, NormalizedToGui(imgRect, markers[i].normalizedPos));
+                if (d <= best)
+                {
+                    best = d;
+                    hit = i;
+                }
+            }
+            return hit;
+        }
+
+        static Vector2 NormalizedToGui(Rect imgRect, Vector2 normalized)
+        {
+            return new Vector2(imgRect.x + normalized.x * imgRect.width, imgRect.y + (1f - normalized.y) * imgRect.height);
+        }
+
+        static Vector2 GuiToNormalized(Rect imgRect, Vector2 guiPos)
+        {
+            return new Vector2(
+                Mathf.Clamp01((guiPos.x - imgRect.x) / Mathf.Max(1f, imgRect.width)),
+                Mathf.Clamp01(1f - (guiPos.y - imgRect.y) / Mathf.Max(1f, imgRect.height)));
+        }
+
+        /// <summary>Editable label list for pins. Returns Removed if a pin was deleted, Moved (label edit) otherwise.</summary>
+        MarkerEdit DrawMarkerList(List<PinMarker> markers)
+        {
+            if (markers.Count == 0) return MarkerEdit.None;
+
+            MarkerEdit edit = MarkerEdit.None;
+            int removeIndex = -1;
+            GUILayout.Space(3f);
+            for (int i = 0; i < markers.Count; i++)
+            {
+                EditorGUILayout.BeginHorizontal();
+                Rect badge = GUILayoutUtility.GetRect(22f, 18f, GUILayout.Width(22f));
+                badge.y += 1f;
+                EditorGUI.DrawRect(badge, styles.PinFill);
+                GUI.Label(badge, (i + 1).ToString(), styles.PinBadge);
+
+                string label = EditorGUILayout.TextField(markers[i].label ?? "");
+                if (label != markers[i].label)
+                {
+                    markers[i].label = label;
+                    edit = MarkerEdit.Moved;
+                }
+                if (GUILayout.Button("×", styles.SubtleButton, GUILayout.Width(24f)))
+                {
+                    removeIndex = i;
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+
+            if (removeIndex < 0) return edit;
+            markers.RemoveAt(removeIndex);
+            return MarkerEdit.Removed;
+        }
+
+        void DrawCategoryBadge(string category, float width)
+        {
+            Rect r = GUILayoutUtility.GetRect(width, 18f, GUILayout.Width(width));
+            r.y += 1f;
+            EditorGUI.DrawRect(r, PlaytestCategories.ColorOf(category));
+            GUI.Label(r, category, styles.CategoryPill);
+        }
+
+        void DrawOutline(Rect r)
+        {
+            if (Event.current.type != EventType.Repaint) return;
+            Color c = styles.BorderColor;
+            EditorGUI.DrawRect(new Rect(r.x, r.y, r.width, 1f), c);
+            EditorGUI.DrawRect(new Rect(r.x, r.yMax - 1f, r.width, 1f), c);
+            EditorGUI.DrawRect(new Rect(r.x, r.y, 1f, r.height), c);
+            EditorGUI.DrawRect(new Rect(r.xMax - 1f, r.y, 1f, r.height), c);
+        }
+
+        static string Summarize(string text, int maxLength)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return "(No description)";
+            string singleLine = text.Replace("\r", " ").Replace("\n", " ").Trim();
+            return singleLine.Length <= maxLength ? singleLine : singleLine.Substring(0, maxLength - 1) + "…";
+        }
+
+        #endregion
     }
 }

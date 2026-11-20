@@ -23,7 +23,21 @@ Every entry saves directly into `<ProjectRoot>/PlaytestLogs/` (`changes.md` Mark
 
 ## Usage
 
-- Press **`F1`** at any time (Play Mode or Edit Mode) to open **Playtest Logger** and automatically snap the current frame, or open via **`Window -> Playtest Logger`** (`Cmd/Ctrl+Shift+L`).
-- Use the top **Action** dropdown to switch between **New Log Entry**, **Saved Entries**, **Quick Screenshot**, **Open PlaytestLogs Folder**, and **Open changes.md**.
-- **Markers**: Left-click on any screenshot (new or saved) to drop a pin, **drag** an existing pin to reposition it (the saved PNG re-renders from the clean base capture automatically), or **right-click** a pin to delete it.
-- **Saved Entries**: Tick **Done** to mark resolved (`- [x]` in `changes.md`), edit categories/descriptions inline, drag markers, or click **Retake Screenshot** to replace an entry's image in place.
+- Press **`F1`** at any time (Play Mode or Edit Mode) to open **Playtest Logger** and snap the view you were just looking at (Game View or Scene View), or open it via **`Window -> Playtest Logger`** (`Cmd/Ctrl+Shift+L`).
+- Switch between the **+ New Entry** and **Saved Entries** tabs at the top. The **View** toggle picks Game View or Scene View; with **Auto** on, the draft screenshot follows whichever of the two you focus (it stops once you have placed pins, so it never swaps the image under them).
+- **Actions** menu: **Quick Screenshot Now** (saves a separate entry without touching your draft), **Pause Play Mode on F1 Capture**, **Open PlaytestLogs Folder**, **Open changes.md**.
+- **Markers**: Left-click a screenshot (new or saved) to drop a numbered pin, **drag** a pin to move it, or **right-click** it to delete it. Saved PNGs are re-rendered from the clean capture with matching numbers drawn next to each pin.
+- **Saved Entries**: Tick the checkbox to mark an entry done (`- [x]` in `changes.md`), edit category/description/pin labels inline, use **Select Entry** to jump to one, or **Retake Screenshot** to replace its image in place. **Delete** asks for confirmation and removes the entry's screenshots and console log too.
+- Your draft (screenshot, pins, description) survives script reloads and entering Play Mode, and window toggles are remembered between sessions.
+
+## Output
+
+```text
+PlaytestLogs/
+  changes.md        Markdown checklist, newest first
+  entries.json      Source of truth for the window
+  Screenshots/      <id>.png (with pins) and <id>_clean.png
+  ConsoleLogs/      <id>.log (recent Console messages + stack traces)
+```
+
+If `entries.json` can't be parsed, it is moved aside to `entries.json.<timestamp>.bak` (with a Console warning) instead of being overwritten.
