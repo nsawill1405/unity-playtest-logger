@@ -65,6 +65,8 @@ namespace PlaytestLoggerTool
             if (view == null) return false;
 
             view.orthographic = pose.orthographic;
+            // cameraDistance reads the camera's projection, which the Scene View only syncs on its next repaint.
+            view.camera.orthographic = pose.orthographic;
             float size = pose.orthographic && pose.orthographicSize > 0f ? pose.orthographicSize : view.size;
             view.size = size;
             // The Scene View orbits a pivot in front of its camera, so place the pivot cameraDistance ahead of the pose.
