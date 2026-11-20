@@ -21,11 +21,29 @@ namespace PlaytestLoggerTool
         public static string ScreenshotPath(string id) => "Screenshots/" + id + ".png";
         public static string ConsoleLogPath(string id) => "ConsoleLogs/" + id + ".log";
 
-        public static string FullPath(string relativePath) => Path.Combine(RootDir, relativePath);
+        /// <summary>Resolves a stored relative path, refusing anything that escapes the PlaytestLogs folder.</summary>
+        public static string FullPath(string relativePath)
+        {
+            string root = RootDir;
+            string full = Path.GetFullPath(Path.Combine(root, relativePath));
+            if (!full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"[Playtest Logger] Refusing path outside PlaytestLogs: {relativePath}");
+            }
+            return full;
+        }
 
         public static bool Exists(string relativePath)
         {
-            return !string.IsNullOrEmpty(relativePath) && File.Exists(FullPath(relativePath));
+            if (string.IsNullOrEmpty(relativePath)) return false;
+            try
+            {
+                return File.Exists(FullPath(relativePath));
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
 
         public static void WriteBytes(string relativePath, byte[] bytes)
