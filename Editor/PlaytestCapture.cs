@@ -64,6 +64,8 @@ namespace PlaytestLoggerTool
             SceneView view = SceneView.lastActiveSceneView != null ? SceneView.lastActiveSceneView : EditorWindow.GetWindow<SceneView>();
             if (view == null) return false;
 
+            // 2D mode forces an identity rotation, so leave it when the shot was taken from any other angle.
+            if (view.in2DMode && Quaternion.Angle(pose.rotation, Quaternion.identity) > 0.01f) view.in2DMode = false;
             view.orthographic = pose.orthographic;
             // cameraDistance reads the camera's projection, which the Scene View only syncs on its next repaint.
             view.camera.orthographic = pose.orthographic;
