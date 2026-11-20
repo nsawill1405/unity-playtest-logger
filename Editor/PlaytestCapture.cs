@@ -40,16 +40,39 @@ namespace PlaytestLoggerTool
         /// Captures the requested view, falling back to the Scene View camera. <paramref name="actual"/> reports which
         /// view the image came from so pins are resolved against the right camera. Caller owns the returned texture.
         /// </summary>
-        public static Texture2D Capture(CaptureSource requested, out CaptureSource actual)
+        public static Texture2D Capture(CaptureSource requested, out CaptureSource actual, out CameraPose pose)
         {
             actual = requested;
             if (requested == CaptureSource.GameView)
             {
                 Texture2D tex = CaptureGameView() ?? CaptureCamera(Camera.main);
-                if (tex != null) return tex;
+                if (tex != null)
+                {
+                    pose = CameraPose.From(Camera.main);
+                    return tex;
+                }
             }
             actual = CaptureSource.SceneView;
+            pose = CameraPose.From(SceneViewCamera);
             return CaptureCamera(SceneViewCamera);
+        }
+
+        /// <summary>Moves the Scene View camera to a recorded pose. Returns false if there is no pose or Scene View.</summary>
+        public static bool MoveSceneViewTo(CameraPose pose)
+        {
+            if (pose == null || !pose.valid) return false;
+            SceneView view = SceneView.lastActiveSceneView != null ? SceneView.lastActiveSceneView : EditorWindow.GetWindow<SceneView>();
+            if (view == null) return false;
+
+            view.orthographic = pose.orthographic;
+            float size = pose.orthographic && pose.orthographicSize > 0f ? pose.orthographicSize : view.size;
+            view.size = size;
+            // The Scene View orbits a pivot in front of its camera, so place the pivot cameraDistance ahead of the pose.
+            Vector3 pivot = pose.position + pose.rotation * Vector3.forward * view.cameraDistance;
+            view.LookAtDirect(pivot, pose.rotation, size);
+            view.Repaint();
+            view.Focus();
+            return true;
         }
 
         // Reads the Game View's own render target so Screen Space - Overlay UI is included.

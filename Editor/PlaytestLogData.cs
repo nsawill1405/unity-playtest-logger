@@ -22,6 +22,31 @@ namespace PlaytestLoggerTool
         }
     }
 
+    /// <summary>Where the camera was when a screenshot was taken, so the Scene View can be moved back there.</summary>
+    [Serializable]
+    public class CameraPose
+    {
+        public bool valid;
+        public Vector3 position;
+        public Quaternion rotation = Quaternion.identity;
+        public bool orthographic;
+        public float orthographicSize;
+
+        public static CameraPose From(Camera cam)
+        {
+            if (cam == null) return new CameraPose();
+            Transform t = cam.transform;
+            return new CameraPose
+            {
+                valid = true,
+                position = t.position,
+                rotation = t.rotation,
+                orthographic = cam.orthographic,
+                orthographicSize = cam.orthographicSize
+            };
+        }
+    }
+
     [Serializable]
     public class LogEntry
     {
@@ -32,6 +57,7 @@ namespace PlaytestLoggerTool
         public string scene;
         public string contextInfo;
         public CaptureSource captureSource;
+        public CameraPose cameraPose = new CameraPose();
         public string targetElement; // Legacy (v1.0); migrated into markers on load.
         public string cleanScreenshotFile;
         public string screenshotFile;

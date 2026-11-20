@@ -27,7 +27,7 @@ Every entry saves directly into `<ProjectRoot>/PlaytestLogs/` (`changes.md` Mark
 - Switch between the **+ New Entry** and **Saved Entries** tabs at the top. The **View** toggle picks Game View or Scene View; with **Auto** on, the draft screenshot follows whichever of the two you focus (it stops once you have placed pins, so it never swaps the image under them).
 - **Actions** menu: **Quick Screenshot Now** (saves a separate entry without touching your draft), **Pause Play Mode on F1 Capture**, **Open PlaytestLogs Folder**, **Open changes.md**.
 - **Markers**: Left-click a screenshot (new or saved) to drop a numbered pin, **drag** a pin to move it, or **right-click** it to delete it. Saved PNGs are re-rendered from the clean capture with matching numbers drawn next to each pin.
-- **Saved Entries**: Tick the checkbox to mark an entry done (`- [x]` in `changes.md`), edit category/description/pin labels inline, use **Select Entry** to jump to one, or **Retake Screenshot** to replace its image in place. **Delete** asks for confirmation and removes the entry's screenshots and console log too.
+- **Saved Entries**: Tick the checkbox to mark an entry done (`- [x]` in `changes.md`), edit category/description/pin labels inline, use **Select Entry** to jump to one, or **Retake Screenshot** to replace its image in place. **Go to Camera** moves the Scene View camera to the position and rotation the screenshot was taken from (entries captured before v1.3.0 don't have this). **Delete** asks for confirmation and removes the entry's screenshots and console log too.
 - Your draft (screenshot, pins, description) survives script reloads and entering Play Mode, and window toggles are remembered between sessions.
 
 ## Output

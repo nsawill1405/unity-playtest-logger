@@ -71,6 +71,7 @@ namespace PlaytestLoggerTool
         [SerializeField] Tab tab;
         [SerializeField] CaptureSource captureSource;
         [SerializeField] CaptureSource draftSource;
+        [SerializeField] CameraPose draftPose = new CameraPose();
         bool draftNeedsRetake;
         [SerializeField] int newCategoryIndex;
         [SerializeField] bool categoryPickedManually;
@@ -112,12 +113,12 @@ namespace PlaytestLoggerTool
             {
                 EditorApplication.isPaused = true;
             }
-            Texture2D shot = PlaytestCapture.Capture(source, out CaptureSource actual);
+            Texture2D shot = PlaytestCapture.Capture(source, out CaptureSource actual, out CameraPose pose);
 
             PlaytestLoggerWindow win = ShowWindow();
             win.tab = Tab.NewEntry;
             win.captureSource = source;
-            if (win.SetDraft(shot, actual))
+            if (win.SetDraft(shot, actual, pose))
             {
                 win.ShowBanner("Captured fresh screenshot (" + PlaytestCapture.DisplayName(actual) + ")");
             }
@@ -218,10 +219,10 @@ namespace PlaytestLoggerTool
 
         void CaptureDraft()
         {
-            SetDraft(PlaytestCapture.Capture(captureSource, out CaptureSource actual), actual);
+            SetDraft(PlaytestCapture.Capture(captureSource, out CaptureSource actual, out CameraPose pose), actual, pose);
         }
 
-        bool SetDraft(Texture2D capture, CaptureSource source)
+        bool SetDraft(Texture2D capture, CaptureSource source, CameraPose pose)
         {
             if (capture == null)
             {
@@ -232,6 +233,7 @@ namespace PlaytestLoggerTool
             draftTex = capture;
             draftPng = capture.EncodeToPNG();
             draftSource = source;
+            draftPose = pose;
             draftNeedsRetake = false;
             return true;
         }
@@ -275,7 +277,7 @@ namespace PlaytestLoggerTool
         {
             if (AttachScreenshot.Value && draftTex == null) CaptureDraft();
             Texture2D shot = AttachScreenshot.Value ? draftTex : null;
-            AddEntry(PlaytestCategories.Names[newCategoryIndex], newDescription, shot, draftPng, draftSource, draftMarkers);
+            AddEntry(PlaytestCategories.Names[newCategoryIndex], newDescription, shot, draftPng, draftSource, draftPose, draftMarkers);
 
             newDescription = "";
             draftMarkers.Clear();
@@ -287,7 +289,7 @@ namespace PlaytestLoggerTool
         // Saves a separate capture without touching the draft the user may be annotating.
         void SaveQuickScreenshot()
         {
-            Texture2D shot = PlaytestCapture.Capture(captureSource, out CaptureSource actual);
+            Texture2D shot = PlaytestCapture.Capture(captureSource, out CaptureSource actual, out CameraPose pose);
             if (shot == null)
             {
                 ShowBanner("No Game View or Scene View camera to capture");
@@ -295,7 +297,7 @@ namespace PlaytestLoggerTool
             }
             try
             {
-                AddEntry(QuickScreenshotCategory, "Quick screenshot capture", shot, null, actual, new List<PinMarker>());
+                AddEntry(QuickScreenshotCategory, "Quick screenshot capture", shot, null, actual, pose, new List<PinMarker>());
                 ShowBanner("Saved quick screenshot");
             }
             finally
@@ -304,7 +306,7 @@ namespace PlaytestLoggerTool
             }
         }
 
-        void AddEntry(string category, string description, Texture2D shot, byte[] shotPng, CaptureSource source, List<PinMarker> markers)
+        void AddEntry(string category, string description, Texture2D shot, byte[] shotPng, CaptureSource source, CameraPose pose, List<PinMarker> markers)
         {
             DateTime now = DateTime.Now;
             LogEntry entry = new LogEntry
@@ -316,6 +318,7 @@ namespace PlaytestLoggerTool
                 scene = SceneManager.GetActiveScene().name,
                 contextInfo = PlaytestCapture.DescribeContext(),
                 captureSource = source,
+                cameraPose = shot != null ? pose : new CameraPose(),
                 markers = markers.ConvertAll(m => m.Clone())
             };
 
@@ -365,7 +368,7 @@ namespace PlaytestLoggerTool
 
         void RetakeEntryScreenshot(LogEntry entry)
         {
-            Texture2D fresh = PlaytestCapture.Capture(captureSource, out CaptureSource actual);
+            Texture2D fresh = PlaytestCapture.Capture(captureSource, out CaptureSource actual, out CameraPose pose);
             if (fresh == null)
             {
                 ShowBanner("No Game View or Scene View camera to capture");
@@ -373,6 +376,7 @@ namespace PlaytestLoggerTool
             }
 
             entry.captureSource = actual;
+            entry.cameraPose = pose;
             WriteScreenshots(entry, fresh, fresh.EncodeToPNG());
             EvictEntryTexture(entry.id);
             entryTexCache[entry.id] = fresh;
@@ -522,7 +526,7 @@ namespace PlaytestLoggerTool
                 EditorStyles.miniButton, GUILayout.Width(46f));
             if (GUILayout.Button("Retake (F1)", styles.SubtleButton, GUILayout.Width(82f)))
             {
-                if (SetDraft(PlaytestCapture.Capture(captureSource, out CaptureSource actual), actual))
+                if (SetDraft(PlaytestCapture.Capture(captureSource, out CaptureSource actual, out CameraPose pose), actual, pose))
                 {
                     ShowBanner("Captured " + PlaytestCapture.DisplayName(actual));
                 }
@@ -768,6 +772,11 @@ namespace PlaytestLoggerTool
             if (GUILayout.Button("Retake Screenshot", styles.SubtleButton, GUILayout.Width(122f)))
             {
                 RetakeEntryScreenshot(e);
+            }
+            if (e.cameraPose != null && e.cameraPose.valid
+                && GUILayout.Button(new GUIContent("Go to Camera", "Move the Scene View camera to where this screenshot was taken"), styles.SubtleButton, GUILayout.Width(96f)))
+            {
+                PlaytestCapture.MoveSceneViewTo(e.cameraPose);
             }
             if (!string.IsNullOrEmpty(e.screenshotFile) && GUILayout.Button("Open PNG", styles.SubtleButton, GUILayout.Width(76f)))
             {
