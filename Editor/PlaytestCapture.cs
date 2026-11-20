@@ -19,6 +19,21 @@ namespace PlaytestLoggerTool
         static readonly Color32 OutlineColor = new Color32(255, 240, 80, 255);
         static readonly Color32 DigitColor = new Color32(255, 255, 255, 255);
 
+        // The camera drawn last into the Game View (highest depth on Display 1), falling back to Camera.main.
+        static Camera GameViewCamera
+        {
+            get
+            {
+                Camera top = null;
+                foreach (Camera cam in Camera.allCameras)
+                {
+                    if (cam.targetTexture != null || cam.targetDisplay != 0) continue;
+                    if (top == null || cam.depth >= top.depth) top = cam;
+                }
+                return top != null ? top : Camera.main;
+            }
+        }
+
         static Camera SceneViewCamera => SceneView.lastActiveSceneView != null ? SceneView.lastActiveSceneView.camera : null;
 
         public static string DisplayName(CaptureSource source)
@@ -45,10 +60,11 @@ namespace PlaytestLoggerTool
             actual = requested;
             if (requested == CaptureSource.GameView)
             {
-                Texture2D tex = CaptureGameView() ?? CaptureCamera(Camera.main);
+                Camera gameCamera = GameViewCamera;
+                Texture2D tex = CaptureGameView() ?? CaptureCamera(gameCamera);
                 if (tex != null)
                 {
-                    pose = CameraPose.From(Camera.main);
+                    pose = CameraPose.From(gameCamera);
                     return tex;
                 }
             }
