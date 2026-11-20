@@ -111,7 +111,10 @@ namespace PlaytestLoggerTool
                     if (target != null && target.width > 0 && target.height > 0)
                     {
                         RenderTexture temp = RenderTexture.GetTemporary(target.width, target.height, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
-                        Graphics.Blit(target, temp);
+                        // On graphics APIs with UVs starting at the top (D3D, Metal, Vulkan) the Game View's target is stored
+                        // upside down and the Game View flips it when drawing, so flip it the same way here.
+                        if (SystemInfo.graphicsUVStartsAtTop) Graphics.Blit(target, temp, new Vector2(1f, -1f), new Vector2(0f, 1f));
+                        else Graphics.Blit(target, temp);
                         Texture2D tex = ReadPixels(temp);
                         RenderTexture.ReleaseTemporary(temp);
                         return tex;
