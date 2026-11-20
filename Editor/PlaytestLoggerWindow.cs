@@ -485,7 +485,8 @@ namespace PlaytestLoggerTool
             if (GUILayout.Button("+ New Entry", tab == Tab.NewEntry ? styles.TabActive : styles.TabInactive))
             {
                 tab = Tab.NewEntry;
-                if (draftTex == null) CaptureDraft();
+                // Auto-sync may have switched views while the Saved tab was open; follow it unless pins are placed.
+                if (draftTex == null || (draftSource != captureSource && draftMarkers.Count == 0)) CaptureDraft();
             }
             string savedLabel = $"Saved Entries ({openCount} open • {collection.entries.Count} total)";
             if (GUILayout.Button(savedLabel, tab == Tab.SavedEntries ? styles.TabActive : styles.TabInactive))
