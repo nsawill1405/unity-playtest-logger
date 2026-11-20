@@ -71,6 +71,7 @@ namespace PlaytestLoggerTool
         [SerializeField] Tab tab;
         [SerializeField] CaptureSource captureSource;
         [SerializeField] CaptureSource draftSource;
+        bool draftNeedsRetake;
         [SerializeField] int newCategoryIndex;
         [SerializeField] bool categoryPickedManually;
         [SerializeField] string newDescription = "";
@@ -190,7 +191,12 @@ namespace PlaytestLoggerTool
             if (draftMarkers.Count > 0) return;
 
             captureSource = view.Value;
-            if (tab != Tab.NewEntry) return;
+            if (tab != Tab.NewEntry)
+            {
+                // Retake when the user comes back to the New Entry tab.
+                draftNeedsRetake = true;
+                return;
+            }
             EditorApplication.delayCall += () =>
             {
                 if (this == null) return;
@@ -226,6 +232,7 @@ namespace PlaytestLoggerTool
             draftTex = capture;
             draftPng = capture.EncodeToPNG();
             draftSource = source;
+            draftNeedsRetake = false;
             return true;
         }
 
@@ -483,8 +490,7 @@ namespace PlaytestLoggerTool
             if (GUILayout.Button("+ New Entry", tab == Tab.NewEntry ? styles.TabActive : styles.TabInactive))
             {
                 tab = Tab.NewEntry;
-                // Auto-sync may have switched views while the Saved tab was open; follow it unless pins are placed.
-                if (draftTex == null || (draftSource != captureSource && draftMarkers.Count == 0)) CaptureDraft();
+                if (draftTex == null || draftNeedsRetake) CaptureDraft();
             }
             string savedLabel = $"Saved Entries ({openCount} open • {collection.entries.Count} total)";
             if (GUILayout.Button(savedLabel, tab == Tab.SavedEntries ? styles.TabActive : styles.TabInactive))
