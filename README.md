@@ -1,4 +1,16 @@
-# Unity Playtest Logger
+<div align="center">
+
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:0f2027,50:203a43,100:2c5364&height=170&section=header&text=Unity%20Playtest%20Logger&fontSize=52&fontColor=ffffff&fontAlignY=36&desc=Screenshot%2C%20pin%20and%20log%20bugs%20straight%20from%20the%20Unity%20Editor&descAlignY=58&descSize=16" alt="Unity Playtest Logger" width="100%" />
+
+<p>
+  <img src="https://img.shields.io/badge/C%23-512BD4?style=for-the-badge&logo=dotnet&logoColor=white" alt="C#" />
+  <img src="https://img.shields.io/badge/Unity-000000?style=for-the-badge&logo=unity&logoColor=white" alt="Unity" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-2c5364?style=for-the-badge" alt="License" /></a>
+</p>
+
+<p><a href="#features">Features</a> · <a href="#installation-unity-package-manager">Installation (Unity Package Manager)</a> · <a href="#usage">Usage</a> · <a href="#output">Output</a> · <a href="#license">License</a></p>
+
+</div>
 
 A lightweight, zero-runtime-overhead Unity Editor window for logging bugs, UI feedback, and gameplay changes while working in **Play Mode** or **Edit Mode**.
 
@@ -41,3 +53,17 @@ PlaytestLogs/
 ```
 
 If `entries.json` can't be parsed, it is moved aside to `entries.json.<timestamp>.bak` (with a Console warning) instead of being overwritten.
+
+## License
+
+[MIT](LICENSE) © William North. Issues and pull requests are welcome.
+
+---
+
+<div align="center">
+
+<sub>Made by <a href="https://github.com/nsawill1405">William North</a> · <a href="https://nsawill.co.uk">nsawill.co.uk</a></sub>
+
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:2c5364,50:203a43,100:0f2027&height=100&section=footer" alt="" width="100%" />
+
+</div>
