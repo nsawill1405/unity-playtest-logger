@@ -366,8 +366,6 @@ namespace PlaytestLoggerTool
             }
 
             entry.captureSource = actual;
-            entry.scene = SceneManager.GetActiveScene().name;
-            entry.contextInfo = PlaytestCapture.DescribeContext();
             WriteScreenshots(entry, fresh, fresh.EncodeToPNG());
             EvictEntryTexture(entry.id);
             entryTexCache[entry.id] = fresh;
