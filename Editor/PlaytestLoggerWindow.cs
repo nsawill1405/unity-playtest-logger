@@ -76,7 +76,7 @@ namespace PlaytestLoggerTool
         static readonly Vector2 MinWindowSize = new Vector2(430f, 500f);
         static readonly string[] CaptureSourceLabels = { "Game View (UI)", "Scene View" };
 
-        const string QuickCaptureShortcutId = "Playtest Logger/Quick Capture";
+        const string QuickCaptureShortcutId = "Main Menu/Window/Playtest Logger Quick Capture";
         const string ShortcutProfileName = "Playtest Logger";
 
         static readonly EditorPref<bool> AttachScreenshot = BoolPref("AttachScreenshot", true);
@@ -124,9 +124,9 @@ namespace PlaytestLoggerTool
             if (win.draftTex == null) win.CaptureDraft();
         }
 
-        // A Shortcut (not a menu hotkey) so the key can be changed from Settings or the Shortcuts window.
-        [MenuItem("Window/Playtest Logger Quick Capture", false, 1951)]
-        [Shortcut(QuickCaptureShortcutId, KeyCode.F1)]
+        // A menu hotkey rather than a [Shortcut]: Unity ignores non-menu shortcuts while a playing Game View has focus.
+        // It can still be rebound from Settings or the Shortcuts window (as Main Menu > Window > Playtest Logger Quick Capture).
+        [MenuItem("Window/Playtest Logger Quick Capture _F1", false, 1951)]
         public static void QuickCaptureAndFocus()
         {
             // Capture before focusing our window: if it is docked over the Game/Scene View, focusing it hides that view.

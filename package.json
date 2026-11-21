@@ -1,6 +1,6 @@
 {
   "name": "com.nsawill1405.playtest-logger",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "displayName": "Playtest Logger",
   "description": "Lightweight Unity Editor window for capturing Game View (including UI) or Scene View screenshots, placing adjustable callout markers on UI/world elements, attaching console logs, and tracking playtest notes & todos in Markdown and JSON.",
   "unity": "2021.3",
