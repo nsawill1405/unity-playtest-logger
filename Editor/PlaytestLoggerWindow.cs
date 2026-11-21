@@ -84,6 +84,7 @@ namespace PlaytestLoggerTool
         static readonly EditorPref<bool> PauseOnQuickCapture = BoolPref("PauseOnQuickCapture", false);
         static readonly EditorPref<bool> HideResolved = BoolPref("HideResolved", false);
         static readonly EditorPref<bool> ConfirmDelete = BoolPref("ConfirmDelete", true);
+        static readonly EditorPref<bool> KeepOnTop = BoolPref("KeepOnTop", false);
         static readonly EditorPref<int> PinRaycastLayers = IntPref("PinRaycastLayers", Physics.DefaultRaycastLayers);
 
         static string DraftImagePath => Path.GetFullPath(Path.Combine(Application.dataPath, "..", "Library", "PlaytestLoggerDraft.png"));
@@ -156,10 +157,48 @@ namespace PlaytestLoggerTool
 
         static PlaytestLoggerWindow ShowWindow()
         {
-            PlaytestLoggerWindow win = GetWindow<PlaytestLoggerWindow>(WindowTitle);
+            // A utility window floats above the Editor's other windows instead of docking.
+            PlaytestLoggerWindow win = GetWindow<PlaytestLoggerWindow>(KeepOnTop.Value, WindowTitle);
             win.minSize = MinWindowSize;
             win.Focus();
             return win;
+        }
+
+        // A window can't switch between utility and normal once shown, so swap in a new one carrying over the draft.
+        void ReopenWindow()
+        {
+            Rect rect = position;
+            PlaytestLoggerWindow next = CreateInstance<PlaytestLoggerWindow>();
+            MoveStateTo(next);
+            Close();
+            next.titleContent = new GUIContent(WindowTitle);
+            next.minSize = MinWindowSize;
+            if (KeepOnTop.Value) next.ShowUtility();
+            else next.Show();
+            next.position = rect;
+            next.Focus();
+        }
+
+        void MoveStateTo(PlaytestLoggerWindow next)
+        {
+            next.DestroyDraftTexture();
+            next.draftTex = draftTex;
+            next.draftPng = draftPng;
+            draftTex = null;
+            draftPng = null;
+
+            next.tab = tab;
+            next.captureSource = captureSource;
+            next.draftSource = draftSource;
+            next.draftPose = draftPose;
+            next.newCategoryIndex = newCategoryIndex;
+            next.categoryPickedManually = categoryPickedManually;
+            next.newDescription = newDescription;
+            next.draftMarkers = new List<PinMarker>(draftMarkers);
+            next.expandedEntryId = expandedEntryId;
+            next.formScroll = formScroll;
+            next.savedScroll = savedScroll;
+            next.showSettings = showSettings;
         }
 
         #region Lifecycle
@@ -592,6 +631,15 @@ namespace PlaytestLoggerTool
             EditorGUILayout.PrefixLabel(new GUIContent("Quick Capture Key", "Captures the Game View or Scene View you're looking at, from anywhere in the Editor"));
             DrawShortcutRecorder();
             EditorGUILayout.EndHorizontal();
+
+            bool keepOnTop = EditorGUILayout.Toggle(
+                new GUIContent("Keep Window on Top", "Float above the Editor's other windows instead of docking"),
+                KeepOnTop.Value);
+            if (keepOnTop != KeepOnTop.Value)
+            {
+                KeepOnTop.Value = keepOnTop;
+                EditorApplication.delayCall += ReopenWindow;
+            }
 
             PinRaycastLayers.Value = LayerMaskField(
                 new GUIContent("Pin Raycast Layers", "Layers a pin's raycast can hit when naming the object under it"),
