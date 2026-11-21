@@ -628,12 +628,19 @@ namespace PlaytestLoggerTool
 
         static bool IsModifierKey(KeyCode key) => key == KeyCode.None || (key >= KeyCode.RightShift && key <= KeyCode.AltGr);
 
+        // Same mapping as Unity's Shortcuts window: Action is Cmd on macOS and Ctrl elsewhere, and macOS Ctrl is Control.
         static ShortcutModifiers ModifiersOf(Event ev)
         {
             ShortcutModifiers modifiers = ShortcutModifiers.None;
             if (ev.alt) modifiers |= ShortcutModifiers.Alt;
             if (ev.shift) modifiers |= ShortcutModifiers.Shift;
-            if (ev.control || ev.command) modifiers |= ShortcutModifiers.Action;
+            bool mac = Application.platform == RuntimePlatform.OSXEditor;
+            if (ev.command || (ev.control && !mac)) modifiers |= ShortcutModifiers.Action;
+#if UNITY_2021_2_OR_NEWER
+            if (ev.control && mac) modifiers |= ShortcutModifiers.Control;
+#else
+            if (ev.control && mac) modifiers |= ShortcutModifiers.Action;
+#endif
             return modifiers;
         }
 
