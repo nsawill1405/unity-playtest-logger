@@ -124,7 +124,7 @@ namespace PlaytestLoggerTool
             if (win.draftTex == null) win.CaptureDraft();
         }
 
-        // A Shortcut (not a menu hotkey) so the key can be changed from Settings or Edit > Shortcuts.
+        // A Shortcut (not a menu hotkey) so the key can be changed from Settings or the Shortcuts window.
         [MenuItem("Window/Playtest Logger Quick Capture", false, 1951)]
         [Shortcut(QuickCaptureShortcutId, KeyCode.F1)]
         public static void QuickCaptureAndFocus()
@@ -670,8 +670,20 @@ namespace PlaytestLoggerTool
             }
             if (GUILayout.Button("Shortcuts…", styles.SubtleButton, GUILayout.Width(76f)))
             {
-                EditorApplication.ExecuteMenuItem("Edit/Shortcuts...");
+                OpenShortcutsWindow();
             }
+        }
+
+        // The Shortcuts window is internal and its menu is Edit > Shortcuts on Windows/Linux but Unity > Shortcuts on macOS.
+        static void OpenShortcutsWindow()
+        {
+            Type window = typeof(ShortcutManager).Assembly.GetType("UnityEditor.ShortcutManagement.ShortcutManagerWindow");
+            if (window != null && typeof(EditorWindow).IsAssignableFrom(window))
+            {
+                EditorWindow.GetWindow(window);
+                return;
+            }
+            EditorApplication.ExecuteMenuItem(Application.platform == RuntimePlatform.OSXEditor ? "Unity/Shortcuts..." : "Edit/Shortcuts...");
         }
 
         static bool IsModifierKey(KeyCode key) => key == KeyCode.None || (key >= KeyCode.RightShift && key <= KeyCode.AltGr);
