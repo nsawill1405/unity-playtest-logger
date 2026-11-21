@@ -8,13 +8,17 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-2c5364?style=for-the-badge" alt="License" /></a>
 </p>
 
-<p><a href="#features">Features</a> · <a href="#installation-unity-package-manager">Installation (Unity Package Manager)</a> · <a href="#usage">Usage</a> · <a href="#output">Output</a> · <a href="#license">License</a></p>
+<p><a href="#features">Features</a> · <a href="#installation-unity-package-manager">Installation (Unity Package Manager)</a> · <a href="#usage">Usage</a> · <a href="#editing-saved-entries">Editing saved entries</a> · <a href="#done-deleted-and-tidy">Done, deleted, tidy</a> · <a href="#output">Output</a> · <a href="#license">License</a></p>
 
 </div>
 
 A lightweight, zero-runtime-overhead Unity Editor window for logging bugs, UI feedback, and gameplay changes while working in **Play Mode** or **Edit Mode**.
 
 Every entry saves directly into `<ProjectRoot>/PlaytestLogs/` (`changes.md` Markdown checklist + `entries.json` + annotated/clean PNG screenshots + Unity Console snapshots), making it effortless to review yourself or feed directly to coding agents.
+
+Hit **F1**, retake the view you are looking at, drop numbered pins on the screenshot, describe what is wrong, and save — the whole loop takes seconds and runs entirely inside the Editor.
+
+![Logging a bug: retake the view, drop pins, describe, and save](docs/media/demo-new-entry.gif)
 
 ## Features
 
@@ -41,6 +45,18 @@ Every entry saves directly into `<ProjectRoot>/PlaytestLogs/` (`changes.md` Mark
 - **Markers**: Left-click a screenshot (new or saved) to drop a numbered pin, **drag** a pin to move it, or **right-click** it to delete it. Saved PNGs are re-rendered from the clean capture with matching numbers drawn next to each pin.
 - **Saved Entries**: Tick the checkbox to mark an entry done (`- [x]` in `changes.md`), edit category/description/pin labels inline, use **Select Entry** to jump to one, or **Retake Screenshot** to replace its image in place. **Go to Camera** moves the Scene View camera to the position and rotation the screenshot was taken from (entries captured before v1.3.0 don't have this). **Delete** removes the entry's screenshots and console log too. It asks for confirmation unless you pick **Delete, Don't Ask Again**; turn the prompt back on with **Actions > Ask Before Deleting Entries**.
 - Your draft (screenshot, pins, description) survives script reloads and entering Play Mode, and window toggles are remembered between sessions.
+
+## Editing saved entries
+
+Saved entries are never write-once. Change the category, tweak the description, drag pins to new positions or delete them, and the entry's PNGs are re-rendered from the clean capture. **Retake Screenshot** replaces the image in place without touching your notes, and **Go to Camera** jumps the Scene View to wherever the shot was taken so you can check the issue again right away.
+
+![Editing a saved entry: change category, add and remove pins, and go to the captured camera](docs/media/demo-edit-entry.gif)
+
+## Done, deleted, and tidy
+
+Mark an entry done and it becomes a `- [x]` line in `changes.md`. **Hide Done Entries** clears finished work out of the way until you need it back. **Delete** removes the entry's screenshots and console log too, asking for confirmation first — pick **Delete, Don't Ask Again** once and it stops asking. **Collapse All** folds long sessions down to a one-line summary per category.
+
+![Marking an entry done, toggling Hide Done Entries, and deleting it](docs/media/demo-done-and-delete.gif)
 
 ## Output
 
