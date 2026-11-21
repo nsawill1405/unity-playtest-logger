@@ -63,6 +63,7 @@ namespace PlaytestLoggerTool
         static readonly EditorPrefBool AttachConsoleLogs = new EditorPrefBool("AttachConsoleLogs", true);
         static readonly EditorPrefBool PauseOnQuickCapture = new EditorPrefBool("PauseOnQuickCapture", false);
         static readonly EditorPrefBool HideResolved = new EditorPrefBool("HideResolved", false);
+        static readonly EditorPrefBool ConfirmDelete = new EditorPrefBool("ConfirmDelete", true);
 
         static string DraftImagePath => Path.GetFullPath(Path.Combine(Application.dataPath, "..", "Library", "PlaytestLoggerDraft.png"));
 
@@ -76,6 +77,7 @@ namespace PlaytestLoggerTool
         [SerializeField] int newCategoryIndex;
         [SerializeField] bool categoryPickedManually;
         [SerializeField] string newDescription = "";
+        [SerializeField] int descriptionGeneration;
         [SerializeField] List<PinMarker> draftMarkers = new List<PinMarker>();
         [SerializeField] string expandedEntryId = "";
         [SerializeField] Vector2 formScroll;
@@ -279,11 +281,23 @@ namespace PlaytestLoggerTool
             Texture2D shot = AttachScreenshot.Value ? draftTex : null;
             AddEntry(PlaytestCategories.Names[newCategoryIndex], newDescription, shot, draftPng, draftSource, draftPose, draftMarkers);
 
-            newDescription = "";
+            ResetDescriptionField();
             draftMarkers.Clear();
             categoryPickedManually = false;
-            GUIUtility.keyboardControl = 0; // otherwise the focused text area keeps showing the old text
             ShowBanner("Saved entry to PlaytestLogs/changes.md");
+        }
+
+        // IMGUI keeps the text being edited in a shared editor tied to the text area's control ID, and can write it back
+        // into the field after we clear it. Dropping focus and giving the next draft's text area a new control ID means
+        // the old text can never come back.
+        void ResetDescriptionField()
+        {
+            newDescription = "";
+            descriptionGeneration++;
+            GUI.FocusControl(null);
+            GUIUtility.keyboardControl = 0;
+            EditorGUIUtility.editingTextField = false;
+            Repaint();
         }
 
         // Saves a separate capture without touching the draft the user may be annotating.
@@ -389,11 +403,14 @@ namespace PlaytestLoggerTool
             ReloadEntries();
             LogEntry entry = collection.entries.Find(e => e.id == entryId);
             if (entry == null) return;
-            if (!EditorUtility.DisplayDialog("Delete log entry?",
-                    "This removes the entry from changes.md and entries.json and deletes its screenshots and console log.",
-                    "Delete", "Cancel"))
+            if (ConfirmDelete.Value)
             {
-                return;
+                int choice = EditorUtility.DisplayDialogComplex("Delete log entry?",
+                    "This removes the entry from changes.md and entries.json and deletes its screenshots and console log.\n\n" +
+                    "You can turn this prompt back on from Actions > Ask Before Deleting Entries.",
+                    "Delete", "Cancel", "Delete, Don't Ask Again");
+                if (choice == 1) return;
+                if (choice == 2) ConfirmDelete.Value = false;
             }
 
             collection.entries.Remove(entry);
@@ -543,6 +560,8 @@ namespace PlaytestLoggerTool
             menu.AddSeparator("");
             menu.AddItem(new GUIContent("Pause Play Mode on F1 Capture"), PauseOnQuickCapture.Value,
                 () => PauseOnQuickCapture.Value = !PauseOnQuickCapture.Value);
+            menu.AddItem(new GUIContent("Ask Before Deleting Entries"), ConfirmDelete.Value,
+                () => ConfirmDelete.Value = !ConfirmDelete.Value);
             menu.AddSeparator("");
             menu.AddItem(new GUIContent("Open PlaytestLogs Folder"), false, OpenLogsFolder);
             menu.AddItem(new GUIContent("Open changes.md Markdown"), false, OpenMarkdown);
@@ -605,6 +624,7 @@ namespace PlaytestLoggerTool
             GUILayout.Space(8f);
             GUILayout.Label("Description", styles.SectionTitle);
             GUILayout.Space(2f);
+            if (descriptionGeneration % 2 == 1) GUIUtility.GetControlID(FocusType.Passive); // shifts the text area's control ID per draft
             newDescription = EditorGUILayout.TextArea(newDescription, styles.TextArea, GUILayout.MinHeight(78f));
 
             GUILayout.Space(8f);
