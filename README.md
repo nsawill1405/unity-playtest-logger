@@ -22,9 +22,9 @@ Hit **F1**, retake the view you are looking at, drop numbered pins on the screen
 
 ## Features
 
-- **Dedicated Standalone Window** (`Window -> Playtest Logger` or **`Cmd/Ctrl+Shift+L`**, quick capture on **`F1`**) — stays out of your Scene View and Game View.
+- **Dedicated Standalone Window** (`Window -> Playtest Logger` or **`Cmd/Ctrl+Shift+L`**, quick capture on **`F1`** by default) — stays out of your Scene View and Game View.
 - **Captures UI & 3D Views** — grabs either **Game View (including `Screen Space - Overlay` UI Canvases)** or **Scene View** in both Play Mode and Edit Mode.
-- **Interactive Adjustable Markers** — click anywhere on a screenshot to place numbered callout pins, **drag pins** to adjust their position at any time, or right-click a pin to remove it. Automatically detects the UI `RectTransform` hierarchy path (`UI: Canvas/...`) or 3D Collider object under each pin.
+- **Interactive Adjustable Markers** — click anywhere on a screenshot to place numbered callout pins, **drag pins** to adjust their position at any time, or right-click a pin to remove it. Automatically detects the UI `RectTransform` hierarchy path (`UI: Canvas/...`) or 3D Collider object under each pin (pick which layers the raycast hits in **Settings**).
 - **Full Editing & Retake on Saved Entries** — edit categories, descriptions, marker positions/labels, or **retake the screenshot** on any previously saved entry without losing your notes or pins.
 - **Markdown + Console Log Snapshots** — writes a clean `- [ ]` / `- [x]` checklist to `PlaytestLogs/changes.md` alongside recent Unity Console logs and stack traces.
 
@@ -39,11 +39,12 @@ Hit **F1**, retake the view you are looking at, drop numbered pins on the screen
 
 ## Usage
 
-- Press **`F1`** at any time (Play Mode or Edit Mode) to open **Playtest Logger** and snap the view you were just looking at (Game View or Scene View), or open it via **`Window -> Playtest Logger`** (`Cmd/Ctrl+Shift+L`).
-- Switch between the **+ New Entry** and **Saved Entries** tabs at the top. The **View** toggle picks Game View or Scene View; with **Auto** on, the draft screenshot follows whichever of the two you focus (it stops once you have placed pins, so it never swaps the image under them).
-- **Actions** menu: **Quick Screenshot Now** (saves a separate entry without touching your draft), **Pause Play Mode on F1 Capture**, **Ask Before Deleting Entries**, **Open PlaytestLogs Folder**, **Open changes.md**.
+- Press **`F1`** (or your own key, set in **Settings**) at any time (Play Mode or Edit Mode) to open **Playtest Logger** and snap the view you were just looking at (Game View or Scene View), or open it via **`Window -> Playtest Logger`** (`Cmd/Ctrl+Shift+L`).
+- Switch between the **+ New Entry** and **Saved Entries** tabs at the top. The **View** toggle picks Game View or Scene View and retakes the draft screenshot; switching Unity's own Scene/Game tabs leaves the draft alone.
+- **Settings**: change the **Quick Capture Key** (click it and press the new key; this is also under **Edit > Shortcuts > Playtest Logger**) and the **Pin Raycast Layers** used to name the object under a pin.
+- **Actions** menu: **Quick Screenshot Now** (saves a separate entry without touching your draft), **Pause Play Mode on Quick Capture**, **Ask Before Deleting Entries**, **Open PlaytestLogs Folder**, **Open changes.md**.
 - **Markers**: Left-click a screenshot (new or saved) to drop a numbered pin, **drag** a pin to move it, or **right-click** it to delete it. Saved PNGs are re-rendered from the clean capture with matching numbers drawn next to each pin.
-- **Saved Entries**: Tick the checkbox to mark an entry done (`- [x]` in `changes.md`), edit category/description/pin labels inline, use **Select Entry** to jump to one, or **Retake Screenshot** to replace its image in place. **Go to Camera** moves the Scene View camera to the position and rotation the screenshot was taken from (entries captured before v1.3.0 don't have this). **Delete** removes the entry's screenshots and console log too. It asks for confirmation unless you pick **Delete, Don't Ask Again**; turn the prompt back on with **Actions > Ask Before Deleting Entries**.
+- **Saved Entries**: Tick the checkbox to mark an entry done (`- [x]` in `changes.md`), edit category/description/pin labels inline, or **Retake Screenshot** to replace its image in place. **Go to Camera** moves the Scene View camera to the position and rotation the screenshot was taken from (entries captured before v1.3.0 don't have this). **Delete** removes the entry's screenshots and console log too. It asks for confirmation unless you pick **Delete, Don't Ask Again**; turn the prompt back on with **Actions > Ask Before Deleting Entries**.
 - Your draft (screenshot, pins, description) survives script reloads and entering Play Mode, and window toggles are remembered between sessions.
 
 ## Editing saved entries

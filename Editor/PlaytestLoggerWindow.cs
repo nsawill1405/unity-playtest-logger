@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using UnityEditor;
+using UnityEditor.ShortcutManagement;
 using UnityEditorInternal;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -25,30 +27,46 @@ namespace PlaytestLoggerTool
             Removed
         }
 
-        /// <summary>A bool stored in EditorPrefs, read lazily (EditorPrefs can't be used from static initializers).</summary>
-        sealed class EditorPrefBool
+        /// <summary>A value stored in EditorPrefs, read lazily (EditorPrefs can't be used from static initializers).</summary>
+        sealed class EditorPref<T>
         {
             readonly string key;
-            readonly bool defaultValue;
-            bool? cached;
+            readonly T defaultValue;
+            readonly Func<string, T, T> read;
+            readonly Action<string, T> write;
+            bool loaded;
+            T value;
 
-            public EditorPrefBool(string key, bool defaultValue)
+            public EditorPref(string key, T defaultValue, Func<string, T, T> read, Action<string, T> write)
             {
                 this.key = "PlaytestLogger." + key;
                 this.defaultValue = defaultValue;
+                this.read = read;
+                this.write = write;
             }
 
-            public bool Value
+            public T Value
             {
-                get => cached ??= EditorPrefs.GetBool(key, defaultValue);
+                get
+                {
+                    if (!loaded)
+                    {
+                        value = read(key, defaultValue);
+                        loaded = true;
+                    }
+                    return value;
+                }
                 set
                 {
-                    if (Value == value) return;
-                    cached = value;
-                    EditorPrefs.SetBool(key, value);
+                    if (EqualityComparer<T>.Default.Equals(Value, value)) return;
+                    this.value = value;
+                    write(key, value);
                 }
             }
         }
+
+        static EditorPref<bool> BoolPref(string key, bool defaultValue) => new EditorPref<bool>(key, defaultValue, EditorPrefs.GetBool, EditorPrefs.SetBool);
+        static EditorPref<int> IntPref(string key, int defaultValue) => new EditorPref<int>(key, defaultValue, EditorPrefs.GetInt, EditorPrefs.SetInt);
 
         const string WindowTitle = "Playtest Logger";
         const string QuickScreenshotCategory = PlaytestCategories.Visuals;
@@ -58,12 +76,15 @@ namespace PlaytestLoggerTool
         static readonly Vector2 MinWindowSize = new Vector2(430f, 500f);
         static readonly string[] CaptureSourceLabels = { "Game View (UI)", "Scene View" };
 
-        static readonly EditorPrefBool AutoSyncActiveView = new EditorPrefBool("AutoSyncActiveView", true);
-        static readonly EditorPrefBool AttachScreenshot = new EditorPrefBool("AttachScreenshot", true);
-        static readonly EditorPrefBool AttachConsoleLogs = new EditorPrefBool("AttachConsoleLogs", true);
-        static readonly EditorPrefBool PauseOnQuickCapture = new EditorPrefBool("PauseOnQuickCapture", false);
-        static readonly EditorPrefBool HideResolved = new EditorPrefBool("HideResolved", false);
-        static readonly EditorPrefBool ConfirmDelete = new EditorPrefBool("ConfirmDelete", true);
+        const string QuickCaptureShortcutId = "Playtest Logger/Quick Capture";
+        const string ShortcutProfileName = "Playtest Logger";
+
+        static readonly EditorPref<bool> AttachScreenshot = BoolPref("AttachScreenshot", true);
+        static readonly EditorPref<bool> AttachConsoleLogs = BoolPref("AttachConsoleLogs", true);
+        static readonly EditorPref<bool> PauseOnQuickCapture = BoolPref("PauseOnQuickCapture", false);
+        static readonly EditorPref<bool> HideResolved = BoolPref("HideResolved", false);
+        static readonly EditorPref<bool> ConfirmDelete = BoolPref("ConfirmDelete", true);
+        static readonly EditorPref<int> PinRaycastLayers = IntPref("PinRaycastLayers", Physics.DefaultRaycastLayers);
 
         static string DraftImagePath => Path.GetFullPath(Path.Combine(Application.dataPath, "..", "Library", "PlaytestLoggerDraft.png"));
 
@@ -73,15 +94,14 @@ namespace PlaytestLoggerTool
         [SerializeField] CaptureSource captureSource;
         [SerializeField] CaptureSource draftSource;
         [SerializeField] CameraPose draftPose = new CameraPose();
-        bool draftNeedsRetake;
         [SerializeField] int newCategoryIndex;
         [SerializeField] bool categoryPickedManually;
         [SerializeField] string newDescription = "";
-        [SerializeField] int descriptionGeneration;
         [SerializeField] List<PinMarker> draftMarkers = new List<PinMarker>();
         [SerializeField] string expandedEntryId = "";
         [SerializeField] Vector2 formScroll;
         [SerializeField] Vector2 savedScroll;
+        [SerializeField] bool showSettings;
 
         Texture2D draftTex;
         byte[] draftPng;
@@ -89,10 +109,10 @@ namespace PlaytestLoggerTool
         readonly Dictionary<string, Texture2D> entryTexCache = new Dictionary<string, Texture2D>();
         PlaytestLoggerStyles styles;
 
-        CaptureSource? lastFocusedViewSource;
         int draggingMarkerIndex = -1;
         bool dragMoved;
-        bool scrollToExpandedEntry;
+        bool recordingShortcut;
+        int textFieldLayout;
         string banner;
         double bannerUntil;
 
@@ -103,7 +123,9 @@ namespace PlaytestLoggerTool
             if (win.draftTex == null) win.CaptureDraft();
         }
 
-        [MenuItem("Window/Playtest Logger Quick Capture _F1", false, 1951)]
+        // A Shortcut (not a menu hotkey) so the key can be changed from Settings or Edit > Shortcuts.
+        [MenuItem("Window/Playtest Logger Quick Capture", false, 1951)]
+        [Shortcut(QuickCaptureShortcutId, KeyCode.F1)]
         public static void QuickCaptureAndFocus()
         {
             // Capture before focusing our window: if it is docked over the Game/Scene View, focusing it hides that view.
@@ -118,7 +140,7 @@ namespace PlaytestLoggerTool
             Texture2D shot = PlaytestCapture.Capture(source, out CaptureSource actual, out CameraPose pose);
 
             PlaytestLoggerWindow win = ShowWindow();
-            win.tab = Tab.NewEntry;
+            win.SetTab(Tab.NewEntry);
             win.captureSource = source;
             if (win.SetDraft(shot, actual, pose))
             {
@@ -179,33 +201,39 @@ namespace PlaytestLoggerTool
                 banner = null;
                 Repaint();
             }
-            AutoSyncCaptureSource();
         }
 
-        // Follows the user between Scene View and Game View tabs and retakes the draft screenshot.
-        void AutoSyncCaptureSource()
+        void SetTab(Tab next)
         {
-            if (!AutoSyncActiveView.Value) return;
-            CaptureSource? view = PlaytestCapture.SourceOfWindow(focusedWindow);
-            if (view == null || view == lastFocusedViewSource) return;
-            lastFocusedViewSource = view;
+            if (tab == next) return;
+            tab = next;
+            DropTextFocus();
+        }
 
-            // Never swap the screenshot out from under pins the user already placed.
-            if (draftMarkers.Count > 0) return;
+        void SetExpandedEntry(string entryId)
+        {
+            expandedEntryId = entryId;
+            DropTextFocus();
+        }
 
-            captureSource = view.Value;
-            if (tab != Tab.NewEntry)
-            {
-                // Retake when the user comes back to the New Entry tab.
-                draftNeedsRetake = true;
-                return;
-            }
-            EditorApplication.delayCall += () =>
-            {
-                if (this == null) return;
-                CaptureDraft();
-                Repaint();
-            };
+        // IMGUI shares one text editor between all text fields and matches it to a field by control ID. When the set of
+        // fields changes (switching tabs, expanding another entry, adding a pin), a focused field's text can show up in
+        // whichever field now has its ID, e.g. a saved entry's description appearing in the new entry box.
+        static void DropTextFocus()
+        {
+            GUI.FocusControl(null);
+            GUIUtility.keyboardControl = 0;
+            EditorGUIUtility.editingTextField = false;
+        }
+
+        void DropTextFocusIfFieldsChanged()
+        {
+            LogEntry expanded = tab == Tab.SavedEntries ? collection.entries.Find(e => e.id == expandedEntryId) : null;
+            int layout = (tab, expandedEntryId, draftMarkers.Count, expanded?.markers?.Count ?? -1,
+                collection.entries.Count, HideResolved.Value, showSettings).GetHashCode();
+            if (layout == textFieldLayout) return;
+            textFieldLayout = layout;
+            DropTextFocus();
         }
 
         void ShowBanner(string message)
@@ -236,7 +264,6 @@ namespace PlaytestLoggerTool
             draftPng = capture.EncodeToPNG();
             draftSource = source;
             draftPose = pose;
-            draftNeedsRetake = false;
             return true;
         }
 
@@ -281,23 +308,11 @@ namespace PlaytestLoggerTool
             Texture2D shot = AttachScreenshot.Value ? draftTex : null;
             AddEntry(PlaytestCategories.Names[newCategoryIndex], newDescription, shot, draftPng, draftSource, draftPose, draftMarkers);
 
-            ResetDescriptionField();
+            newDescription = "";
+            DropTextFocus();
             draftMarkers.Clear();
             categoryPickedManually = false;
             ShowBanner("Saved entry to PlaytestLogs/changes.md");
-        }
-
-        // IMGUI keeps the text being edited in a shared editor tied to the text area's control ID, and can write it back
-        // into the field after we clear it. Dropping focus and giving the next draft's text area a new control ID means
-        // the old text can never come back.
-        void ResetDescriptionField()
-        {
-            newDescription = "";
-            descriptionGeneration++;
-            GUI.FocusControl(null);
-            GUIUtility.keyboardControl = 0;
-            EditorGUIUtility.editingTextField = false;
-            Repaint();
         }
 
         // Saves a separate capture without touching the draft the user may be annotating.
@@ -413,6 +428,7 @@ namespace PlaytestLoggerTool
                 if (choice == 2) ConfirmDelete.Value = false;
             }
 
+            DropTextFocus();
             collection.entries.Remove(entry);
             PlaytestLogStore.Save(collection);
             PlaytestLogStore.DeleteEntryFiles(entry);
@@ -488,8 +504,10 @@ namespace PlaytestLoggerTool
                 styles = new PlaytestLoggerStyles();
             }
             if (collection == null) ReloadEntries();
+            if (Event.current.type == EventType.Layout) DropTextFocusIfFieldsChanged();
 
             DrawHeader();
+            if (showSettings) DrawSettings();
 
             if (banner != null)
             {
@@ -510,17 +528,16 @@ namespace PlaytestLoggerTool
             EditorGUILayout.BeginHorizontal();
             if (GUILayout.Button("+ New Entry", tab == Tab.NewEntry ? styles.TabActive : styles.TabInactive))
             {
-                tab = Tab.NewEntry;
-                bool retake = draftTex == null || (draftNeedsRetake && draftMarkers.Count == 0);
-                draftNeedsRetake = false;
-                if (retake) CaptureDraft();
+                SetTab(Tab.NewEntry);
+                if (draftTex == null) CaptureDraft();
             }
             string savedLabel = $"Saved Entries ({openCount} open • {collection.entries.Count} total)";
             if (GUILayout.Button(savedLabel, tab == Tab.SavedEntries ? styles.TabActive : styles.TabInactive))
             {
-                tab = Tab.SavedEntries;
+                SetTab(Tab.SavedEntries);
                 ReloadEntries();
             }
+            showSettings = GUILayout.Toggle(showSettings, "Settings", styles.SubtleButton, GUILayout.Width(64f), GUILayout.Height(25f));
             if (GUILayout.Button("Actions ▾", styles.SubtleButton, GUILayout.Width(74f), GUILayout.Height(25f)))
             {
                 ShowActionsMenu();
@@ -538,10 +555,8 @@ namespace PlaytestLoggerTool
                 CaptureDraft();
                 ShowBanner("Switched to " + PlaytestCapture.DisplayName(captureSource) + " & retook screenshot");
             }
-            AutoSyncActiveView.Value = GUILayout.Toggle(AutoSyncActiveView.Value,
-                new GUIContent("Auto", "Automatically retake the screenshot when switching between Scene View and Game View tabs (skipped once the draft has pins)"),
-                EditorStyles.miniButton, GUILayout.Width(46f));
-            if (GUILayout.Button("Retake (F1)", styles.SubtleButton, GUILayout.Width(82f)))
+            GUIContent retake = new GUIContent($"Retake ({QuickCaptureKey})");
+            if (GUILayout.Button(retake, styles.SubtleButton, GUILayout.Width(styles.SubtleButton.CalcSize(retake).x)))
             {
                 if (SetDraft(PlaytestCapture.Capture(captureSource, out CaptureSource actual, out CameraPose pose), actual, pose))
                 {
@@ -558,7 +573,7 @@ namespace PlaytestLoggerTool
             GenericMenu menu = new GenericMenu();
             menu.AddItem(new GUIContent("Quick Screenshot Now"), false, SaveQuickScreenshot);
             menu.AddSeparator("");
-            menu.AddItem(new GUIContent("Pause Play Mode on F1 Capture"), PauseOnQuickCapture.Value,
+            menu.AddItem(new GUIContent("Pause Play Mode on Quick Capture"), PauseOnQuickCapture.Value,
                 () => PauseOnQuickCapture.Value = !PauseOnQuickCapture.Value);
             menu.AddItem(new GUIContent("Ask Before Deleting Entries"), ConfirmDelete.Value,
                 () => ConfirmDelete.Value = !ConfirmDelete.Value);
@@ -566,6 +581,129 @@ namespace PlaytestLoggerTool
             menu.AddItem(new GUIContent("Open PlaytestLogs Folder"), false, OpenLogsFolder);
             menu.AddItem(new GUIContent("Open changes.md Markdown"), false, OpenMarkdown);
             menu.ShowAsContext();
+        }
+
+        void DrawSettings()
+        {
+            EditorGUILayout.BeginVertical(styles.Card);
+            GUILayout.Label("Settings", styles.SectionTitle);
+
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.PrefixLabel(new GUIContent("Quick Capture Key", "Captures the Game View or Scene View you're looking at, from anywhere in the Editor"));
+            DrawShortcutRecorder();
+            EditorGUILayout.EndHorizontal();
+
+            PinRaycastLayers.Value = LayerMaskField(
+                new GUIContent("Pin Raycast Layers", "Layers a pin's raycast can hit when naming the object under it"),
+                PinRaycastLayers.Value);
+            EditorGUILayout.EndVertical();
+        }
+
+        void DrawShortcutRecorder()
+        {
+            Event ev = Event.current;
+            if (recordingShortcut && ev.type == EventType.KeyDown && !IsModifierKey(ev.keyCode))
+            {
+                recordingShortcut = false;
+                if (ev.keyCode != KeyCode.Escape) SetQuickCaptureKey(new KeyCombination(ev.keyCode, ModifiersOf(ev)));
+                ev.Use();
+            }
+
+            string label = recordingShortcut ? "Press a key (Esc to cancel)" : QuickCaptureKey;
+            if (GUILayout.Button(label, EditorStyles.miniButton))
+            {
+                recordingShortcut = !recordingShortcut;
+                DropTextFocus();
+            }
+            if (GUILayout.Button("Reset", styles.SubtleButton, GUILayout.Width(50f)))
+            {
+                recordingShortcut = false;
+                ResetQuickCaptureKey();
+            }
+            if (GUILayout.Button("Shortcuts…", styles.SubtleButton, GUILayout.Width(76f)))
+            {
+                EditorApplication.ExecuteMenuItem("Edit/Shortcuts...");
+            }
+        }
+
+        static bool IsModifierKey(KeyCode key) => key == KeyCode.None || (key >= KeyCode.RightShift && key <= KeyCode.AltGr);
+
+        static ShortcutModifiers ModifiersOf(Event ev)
+        {
+            ShortcutModifiers modifiers = ShortcutModifiers.None;
+            if (ev.alt) modifiers |= ShortcutModifiers.Alt;
+            if (ev.shift) modifiers |= ShortcutModifiers.Shift;
+            if (ev.control || ev.command) modifiers |= ShortcutModifiers.Action;
+            return modifiers;
+        }
+
+        static string QuickCaptureKey
+        {
+            get
+            {
+                try
+                {
+                    string binding = ShortcutManager.instance.GetShortcutBinding(QuickCaptureShortcutId).ToString();
+                    return string.IsNullOrEmpty(binding) ? "no key" : binding;
+                }
+                catch (ArgumentException)
+                {
+                    return "F1";
+                }
+            }
+        }
+
+        void SetQuickCaptureKey(KeyCombination key)
+        {
+            IShortcutManager shortcuts = ShortcutManager.instance;
+            // Unity's Default shortcut profile is read-only, so changes go into a profile of our own (layered on the defaults).
+            if (shortcuts.IsProfileReadOnly(shortcuts.activeProfileId))
+            {
+                if (!shortcuts.GetAvailableProfileIds().Contains(ShortcutProfileName)) shortcuts.CreateProfile(ShortcutProfileName);
+                shortcuts.activeProfileId = ShortcutProfileName;
+            }
+            shortcuts.RebindShortcut(QuickCaptureShortcutId, new ShortcutBinding(key));
+            ShowBanner("Quick capture key set to " + QuickCaptureKey);
+        }
+
+        void ResetQuickCaptureKey()
+        {
+            IShortcutManager shortcuts = ShortcutManager.instance;
+            if (!shortcuts.IsProfileReadOnly(shortcuts.activeProfileId) && shortcuts.IsShortcutOverridden(QuickCaptureShortcutId))
+            {
+                shortcuts.ClearShortcutOverride(QuickCaptureShortcutId);
+            }
+            ShowBanner("Quick capture key reset to " + QuickCaptureKey);
+        }
+
+        // MaskField only lists named layers, so convert between layer bits and positions in that list.
+        static int LayerMaskField(GUIContent label, int mask)
+        {
+            List<string> names = new List<string>();
+            List<int> layers = new List<int>();
+            for (int layer = 0; layer < 32; layer++)
+            {
+                string name = LayerMask.LayerToName(layer);
+                if (string.IsNullOrEmpty(name)) continue;
+                names.Add(name);
+                layers.Add(layer);
+            }
+
+            int listMask = 0;
+            for (int i = 0; i < layers.Count; i++)
+            {
+                if ((mask & (1 << layers[i])) != 0) listMask |= 1 << i;
+            }
+            int next = EditorGUILayout.MaskField(label, listMask, names.ToArray());
+            if (next == listMask) return mask;
+            if (next == -1) return ~0;
+
+            int result = 0;
+            for (int i = 0; i < layers.Count; i++)
+            {
+                if ((next & (1 << i)) != 0) result |= 1 << layers[i];
+            }
+            return result;
         }
 
         void DrawNewEntryTab()
@@ -598,7 +736,7 @@ namespace PlaytestLoggerTool
 
             if (draftTex == null)
             {
-                EditorGUILayout.HelpBox("Press F1 or click 'Retake (F1)' above to capture a screenshot.", MessageType.None);
+                EditorGUILayout.HelpBox($"Press {QuickCaptureKey} or click 'Retake' above to capture a screenshot.", MessageType.None);
             }
             else
             {
@@ -624,7 +762,6 @@ namespace PlaytestLoggerTool
             GUILayout.Space(8f);
             GUILayout.Label("Description", styles.SectionTitle);
             GUILayout.Space(2f);
-            if (descriptionGeneration % 2 == 1) GUIUtility.GetControlID(FocusType.Passive); // shifts the text area's control ID per draft
             newDescription = EditorGUILayout.TextArea(newDescription, styles.TextArea, GUILayout.MinHeight(78f));
 
             GUILayout.Space(8f);
@@ -649,14 +786,12 @@ namespace PlaytestLoggerTool
             List<LogEntry> visible = HideResolved.Value ? collection.entries.FindAll(e => !e.resolved) : collection.entries;
 
             EditorGUILayout.BeginVertical(styles.Card);
-            if (visible.Count > 0) DrawEntryPicker(visible);
-
             EditorGUILayout.BeginHorizontal();
             HideResolved.Value = EditorGUILayout.ToggleLeft("Hide Done Entries", HideResolved.Value, GUILayout.Width(135f));
             GUILayout.FlexibleSpace();
             if (GUILayout.Button("Collapse All", styles.SubtleButton, GUILayout.Width(84f)))
             {
-                expandedEntryId = "";
+                SetExpandedEntry("");
             }
             if (GUILayout.Button("Open Folder", styles.SubtleButton, GUILayout.Width(86f)))
             {
@@ -668,7 +803,7 @@ namespace PlaytestLoggerTool
             if (visible.Count == 0)
             {
                 GUILayout.Space(8f);
-                EditorGUILayout.HelpBox("No matching saved entries. Switch to '+ New Entry' or press F1 to log an issue.", MessageType.Info);
+                EditorGUILayout.HelpBox($"No matching saved entries. Switch to '+ New Entry' or press {QuickCaptureKey} to log an issue.", MessageType.Info);
                 return;
             }
 
@@ -681,42 +816,11 @@ namespace PlaytestLoggerTool
             EditorGUILayout.EndScrollView();
         }
 
-        void DrawEntryPicker(List<LogEntry> visible)
-        {
-            string[] labels = new string[visible.Count];
-            int selected = -1;
-            for (int i = 0; i < visible.Count; i++)
-            {
-                LogEntry e = visible[i];
-                // Swap '/' for a look-alike so Unity's popup doesn't split descriptions into submenus.
-                string summary = Summarize(e.description, 38).Replace("/", "⁄");
-                labels[i] = $"{i + 1}. {(e.resolved ? "[Done] " : "")}[{e.category}] {summary}";
-                if (e.id == expandedEntryId) selected = i;
-            }
-
-            EditorGUILayout.BeginHorizontal();
-            GUILayout.Label("Select Entry:", styles.SectionTitle, GUILayout.Width(82f));
-            int next = EditorGUILayout.Popup(selected, labels);
-            if (next != selected && next >= 0)
-            {
-                expandedEntryId = visible[next].id;
-                scrollToExpandedEntry = true;
-            }
-            EditorGUILayout.EndHorizontal();
-            GUILayout.Space(4f);
-        }
-
         void DrawEntryCard(LogEntry e)
         {
             bool isExpanded = e.id == expandedEntryId;
             Rect cardRect = EditorGUILayout.BeginVertical(styles.Card);
             DrawOutline(cardRect);
-            if (isExpanded && scrollToExpandedEntry && Event.current.type == EventType.Repaint)
-            {
-                scrollToExpandedEntry = false;
-                savedScroll.y = cardRect.y;
-                Repaint();
-            }
 
             EditorGUILayout.BeginHorizontal();
             bool resolved = EditorGUILayout.Toggle(e.resolved, GUILayout.Width(16f));
@@ -729,7 +833,7 @@ namespace PlaytestLoggerTool
             string title = (isExpanded ? "▾ " : "▸ ") + Summarize(e.description, 46);
             if (GUILayout.Button(title, styles.RowHeader, GUILayout.ExpandWidth(true), GUILayout.Height(20f)))
             {
-                expandedEntryId = isExpanded ? "" : e.id;
+                SetExpandedEntry(isExpanded ? "" : e.id);
                 isExpanded = !isExpanded;
             }
             string shortTime = e.timestamp != null && e.timestamp.Length >= 16 ? e.timestamp.Substring(11, 5) : e.timestamp;
@@ -879,7 +983,7 @@ namespace PlaytestLoggerTool
                     if (hit < 0)
                     {
                         Vector2 norm = GuiToNormalized(imgRect, ev.mousePosition);
-                        markers.Add(new PinMarker { normalizedPos = norm, label = PlaytestCapture.DescribePoint(norm, imageSize, source) });
+                        markers.Add(new PinMarker { normalizedPos = norm, label = PlaytestCapture.DescribePoint(norm, imageSize, source, PinRaycastLayers.Value) });
                         hit = markers.Count - 1;
                         edit = MarkerEdit.Added;
                     }
@@ -906,7 +1010,7 @@ namespace PlaytestLoggerTool
                     {
                         // Re-detect only once the pin is dropped; detection walks every canvas in the scene.
                         PinMarker marker = markers[draggingMarkerIndex];
-                        marker.label = PlaytestCapture.DescribePoint(marker.normalizedPos, imageSize, source);
+                        marker.label = PlaytestCapture.DescribePoint(marker.normalizedPos, imageSize, source, PinRaycastLayers.Value);
                     }
                     draggingMarkerIndex = -1;
                     dragMoved = false;

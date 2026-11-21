@@ -215,7 +215,7 @@ namespace PlaytestLoggerTool
         static string FormatVector(Vector3 v) => $"({v.x:F1}, {v.y:F1}, {v.z:F1})";
 
         /// <summary>Describes what is under a point of a capture: a UI element, a collider, or just the position.</summary>
-        public static string DescribePoint(Vector2 normalized, Vector2 imageSize, CaptureSource source)
+        public static string DescribePoint(Vector2 normalized, Vector2 imageSize, CaptureSource source, int raycastLayers)
         {
             string percent = $"({normalized.x * 100f:F0}%, {normalized.y * 100f:F0}%)";
 
@@ -229,7 +229,7 @@ namespace PlaytestLoggerTool
             if (cam != null)
             {
                 Ray ray = cam.ViewportPointToRay(new Vector3(normalized.x, normalized.y, 0f));
-                if (Physics.Raycast(ray, out RaycastHit hit, RaycastDistance))
+                if (Physics.Raycast(ray, out RaycastHit hit, RaycastDistance, raycastLayers))
                 {
                     return $"Object: {GetTransformPath(hit.transform)} at {hit.point:F1}";
                 }
